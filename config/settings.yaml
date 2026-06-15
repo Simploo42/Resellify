@@ -1,0 +1,155 @@
+# ============================================================
+# Resellify Configuration
+# Edit this file to customize your market watching agent.
+# ============================================================
+
+markets:
+  olx:
+    enabled: true
+    base_url: "https://www.olx.ro"
+    # Leave blank for all Romania, or set to: bucuresti, cluj-napoca, timisoara, etc.
+    location: "bucuresti"
+    scan_interval_minutes: 30
+    max_pages_per_keyword: 3
+    # Delay between requests in seconds (respect rate limits)
+    request_delay_seconds: 2.5
+
+  facebook:
+    enabled: false
+    # --- Option A: MCP server (GraphQL, no browser automation, macOS-primary) ---
+    # https://github.com/jdcodes1/facebook-marketplace-mcp
+    # Set use_mcp: true and mcp_server_path to your built dist/index.js
+    use_mcp: false
+    mcp_server_path: ""          # e.g. "/home/user/facebook-marketplace-mcp/dist/index.js"
+    chrome_profile: "Default"    # Chrome profile with active Facebook session
+    # --- Option B: Playwright (requires facebook_cookies.json, cross-platform) ---
+    # See .env.example for FACEBOOK_COOKIES_FILE
+    location: "bucuresti"        # Used for both options
+    radius_km: 50
+    scan_interval_minutes: 60
+    max_results_per_keyword: 40
+
+  ebay:
+    enabled: true
+    # "com" for global, "co.uk", "de", "it", etc. for regional
+    country_tld: "com"
+    scan_interval_minutes: 120
+    max_pages_per_keyword: 2
+
+pricing:
+  # eBay sold listings lookback window
+  ebay_sold_lookback_days: 90
+  # Minimum sold count to trust the eBay price estimate
+  min_sold_for_high_confidence: 10
+  min_sold_for_medium_confidence: 3
+  # Enable Claude AI as fallback when eBay data is sparse
+  llm_fallback_enabled: true
+  llm_model: "claude-haiku-4-5-20251001"
+  # Target currency for all price conversions
+  target_currency: "RON"
+  # Approximate RON/EUR exchange rate (update periodically)
+  eur_to_ron_rate: 4.97
+  usd_to_ron_rate: 4.55
+
+scoring:
+  weights:
+    profit: 0.40      # Profit margin potential
+    demand: 0.35      # Market demand / sell speed
+    confidence: 0.15  # How sure we are of the price estimate
+    risk: 0.10        # Risk factors (condition, age, seller)
+  # Only surface deals with score above this threshold
+  min_deal_score: 55
+  # Minimum profit margin to show (percent)
+  min_profit_percent: 15
+  # Minimum absolute profit in RON to show
+  min_profit_ron: 50
+
+categories:
+  - name: "Laptops & Computers"
+    enabled: true
+    olx_category_path: "/electronice-si-electrocasnice/computere-si-accesorii/laptopuri-si-notebooks/"
+    keywords:
+      - "laptop"
+      - "macbook"
+      - "thinkpad"
+      - "dell xps"
+      - "asus rog"
+      - "lenovo"
+    price_range:
+      min_ron: 300
+      max_ron: 5000
+    condition_filter: ["nou", "ca nou", "folosit"]
+
+  - name: "Smartphones"
+    enabled: true
+    olx_category_path: "/electronice-si-electrocasnice/telefoane-mobile-si-tablete/telefoane-mobile/"
+    keywords:
+      - "iphone 13"
+      - "iphone 14"
+      - "iphone 15"
+      - "samsung galaxy s"
+      - "pixel"
+      - "oneplus"
+    price_range:
+      min_ron: 200
+      max_ron: 4000
+    condition_filter: ["nou", "ca nou", "folosit"]
+
+  - name: "Gaming"
+    enabled: true
+    olx_category_path: "/electronice-si-electrocasnice/console-si-jocuri-video/"
+    keywords:
+      - "ps5"
+      - "playstation 5"
+      - "xbox series x"
+      - "nintendo switch"
+      - "steam deck"
+      - "gpu rtx"
+      - "gtx 1080"
+    price_range:
+      min_ron: 150
+      max_ron: 4000
+    condition_filter: ["nou", "ca nou", "folosit"]
+
+  - name: "Cameras"
+    enabled: true
+    olx_category_path: "/electronice-si-electrocasnice/aparate-foto-si-accesorii/"
+    keywords:
+      - "camera foto"
+      - "nikon"
+      - "canon eos"
+      - "sony alpha"
+      - "fujifilm"
+      - "obiectiv"
+    price_range:
+      min_ron: 200
+      max_ron: 8000
+    condition_filter: ["nou", "ca nou", "folosit"]
+
+  - name: "Audio"
+    enabled: false
+    keywords:
+      - "airpods pro"
+      - "sony wh-1000"
+      - "bose"
+      - "amplificator"
+      - "turntable"
+    price_range:
+      min_ron: 100
+      max_ron: 3000
+
+notifications:
+  # Leave blank to disable
+  discord_webhook_url: ""
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  # Minimum score to trigger a notification (can be higher than min_deal_score)
+  notify_min_score: 75
+
+agent:
+  # How many concurrent scrapers to run
+  max_concurrent_scrapers: 2
+  # Days before re-checking a previously seen listing
+  listing_recheck_days: 3
+  # Days to keep deals in DB before pruning
+  max_listing_age_days: 30

@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}{{ listing.title }} — Resellify{% endblock %}
+{% block content %}
+
+<div class="mb-4">
+  <a href="/" class="text-sm text-gray-500 hover:text-gray-300 transition-colors">← Back to deals</a>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+  <!-- Left: listing info -->
+  <div class="lg:col-span-2 space-y-4">
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+      <div class="flex items-start justify-between gap-4 mb-3">
+        <h1 class="text-xl font-bold text-white leading-snug">{{ listing.title }}</h1>
+        <span class="flex-shrink-0 text-xs px-2 py-1 rounded font-mono
+          {% if listing.platform == 'olx' %}bg-blue-900 text-blue-300
+          {% elif listing.platform == 'facebook' %}bg-indigo-900 text-indigo-300
+          {% else %}bg-amber-900 text-amber-300{% endif %}">
+          {{ listing.platform | upper }}
+        </span>
+      </div>
+
+      <div class="flex items-center flex-wrap gap-3 text-sm text-gray-400 mb-4">
+        {% if listing.category %}<span>{{ listing.category }}</span>{% endif %}
+        {% if listing.condition and listing.condition != 'unknown' %}
+        <span>• Condition: <span class="text-gray-200">{{ listing.condition }}</span></span>
+        {% endif %}
+        {% if listing.location %}<span>• {{ listing.location }}</span>{% endif %}
+        {% if listing.matched_keyword %}<span>• Matched: <code class="text-indigo-400">{{ listing.matched_keyword }}</code></span>{% endif %}
+      </div>
+
+      {% if listing.images %}
+      <div class="flex gap-2 flex-wrap mb-4">
+        {% for img in listing.images[:6] %}
+        <img src="{{ img }}" class="w-24 h-24 object-cover rounded-lg bg-gray-800"
+          loading="lazy" onerror="this.style.display='none'" />
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {% if listing.description %}
+      <div class="text-sm text-gray-400 leading-relaxed whitespace-pre-wrap">{{ listing.description[:800] }}</div>
+      {% endif %}
+
+      <div class="mt-4 pt-4 border-t border-gray-800 flex items-center justify-between">
+        <div class="text-xs text-gray-600">
+          Scraped {{ listing.scraped_at.strftime('%d %b %Y %H:%M') if listing.scraped_at else 'unknown' }}
+          {% if listing.seller_name %} · Seller: {{ listing.seller_name }}{% endif %}
+        </div>
+        <a href="{{ listing.url }}" target="_blank" rel="noopener"
+           class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors">
+          View on {{ listing.platform | capitalize }} ↗
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: score + pricing -->
+  <div class="space-y-4">
+
+    {% if deal_score %}
+    {% set s = deal_score %}
+    {% if s.total_score >= 85 %}{% set gc = 'emerald' %}{% set gl = 'S' %}
+    {% elif s.total_score >= 72 %}{% set gc = 'green' %}{% set gl = 'A' %}
+    {% elif s.total_score >= 58 %}{% set gc = 'yellow' %}{% set gl = 'B' %}
+    {% elif s.total_score >= 45 %}{% set gc = 'orange' %}{% set gl = 'C' %}
+    {% else %}{% set gc = 'red' %}{% set gl = 'D' %}{% endif %}
+
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+      <div class="flex items-center justify-between mb-4">
+        <span class="text-sm font-medium text-gray-300">Deal Score</span>
+        <div class="grade-{{ gl }} w-14 h-14 rounded-xl flex flex-col items-center justify-center">
+          <div class="text-sm font-bold text-white/80 leading-none">{{ gl }}</div>
+          <div class="text-lg font-bold text-white leading-none">{{ s.total_score | int }}</div>
+        </div>
+      </div>
+
+      <!-- Price comparison -->
+      <div class="bg-gray-800 rounded-lg p-3 mb-4">
+        <div class="flex justify-between items-center mb-1">
+          <span class="text-xs text-gray-500">Asking price</span>
+          <span class="font-bold text-white">{{ s.asking_price_ron | int }} RON</span>
+        </div>
+        <div class="flex justify-between items-center mb-1">
+          <span class="text-xs text-gray-500">Est. market value</span>
+          <span class="font-semibold text-gray-300">{{ s.estimated_value_ron | int }} RON</span>
+        </div>
+        <div class="border-t border-gray-700 mt-2 pt-2 flex justify-between items-center">
+          <span class="text-xs text-gray-500">Potential profit</span>
+          <span class="font-bold text-emerald-400 text-lg">+{{ s.estimated_profit_ron | int }} RON ({{ s.profit_percent | int }}%)</span>
+        </div>
+      </div>
+
+      <!-- Score breakdown -->
+      <div class="space-y-2">
+        {% set bars = [
+          ('Profit', s.profit_score, 'emerald'),
+          ('Demand', s.demand_score, 'blue'),
+          ('Confidence', s.confidence_score, 'purple'),
+          ('Low risk', 100 - s.risk_score, 'gray'),
+        ] %}
+        {% for label, val, color in bars %}
+        <div>
+          <div class="flex justify-between text-xs text-gray-500 mb-1">
+            <span>{{ label }}</span>
+            <span class="text-gray-300">{{ val | int }}/100</span>
+          </div>
+          <div class="w-full bg-gray-800 rounded-full h-1.5">
+            <div class="bg-{{ color }}-500 h-1.5 rounded-full" style="width: {{ val | int }}%"></div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+
+      <!-- Notes -->
+      {% if s.notes %}
+      <div class="mt-4 space-y-1">
+        {% for note in s.notes %}
+        <div class="text-xs text-gray-500 flex items-start gap-1.5">
+          <span class="text-gray-600 mt-0.5">•</span>
+          <span>{{ note }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Price estimates -->
+    {% if estimates %}
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+      <h3 class="text-sm font-medium text-gray-300 mb-3">Price Estimates</h3>
+      {% for est in estimates %}
+      <div class="bg-gray-800 rounded-lg p-3 mb-2">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs font-mono text-gray-400">{{ est.method }}</span>
+          <span class="text-sm font-bold text-white">{{ est.estimated_value_ron | int }} RON</span>
+        </div>
+        <div class="text-xs text-gray-500">
+          Confidence: {{ (est.confidence * 100) | int }}%
+          {% if est.sold_count %} · {{ est.sold_count }} sold{% endif %}
+        </div>
+        {% if est.llm_reasoning %}
+        <div class="text-xs text-gray-500 mt-1 italic">{{ est.llm_reasoning }}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+{% endblock %}

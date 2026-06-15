@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-950">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}Resellify{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: '#6366f1', 600: '#4f46e5', 700: '#4338ca' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    [x-cloak] { display: none !important; }
+    .grade-S { background: #10b981; }
+    .grade-A { background: #22c55e; }
+    .grade-B { background: #eab308; }
+    .grade-C { background: #f97316; }
+    .grade-D { background: #ef4444; }
+  </style>
+</head>
+<body class="h-full text-gray-100 font-sans">
+
+  <!-- Nav -->
+  <nav class="bg-gray-900 border-b border-gray-800 sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-14">
+        <div class="flex items-center gap-6">
+          <a href="/" class="flex items-center gap-2">
+            <span class="text-xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent">
+              Resellify
+            </span>
+            <span class="text-xs bg-indigo-900 text-indigo-300 px-2 py-0.5 rounded-full">RO</span>
+          </a>
+          <div class="hidden sm:flex items-center gap-1">
+            <a href="/" class="px-3 py-1.5 text-sm rounded-lg hover:bg-gray-800 {% if request.url.path == '/' %}bg-gray-800 text-white{% else %}text-gray-400{% endif %}">
+              Deals
+            </a>
+            <a href="/config" class="px-3 py-1.5 text-sm rounded-lg hover:bg-gray-800 {% if '/config' in request.url.path %}bg-gray-800 text-white{% else %}text-gray-400{% endif %}">
+              Config
+            </a>
+          </div>
+        </div>
+
+        <!-- Agent status + controls -->
+        <div x-data="agentControl()" class="flex items-center gap-3">
+          <div class="flex items-center gap-1.5 text-xs">
+            <div :class="running ? 'bg-green-500 animate-pulse' : 'bg-gray-600'" class="w-2 h-2 rounded-full"></div>
+            <span x-text="running ? 'Agent running' : 'Agent stopped'" class="text-gray-400"></span>
+          </div>
+          <button @click="toggleAgent()" :class="running ? 'bg-red-700 hover:bg-red-600' : 'bg-indigo-600 hover:bg-indigo-500'"
+            class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors">
+            <span x-text="running ? 'Stop' : 'Start'"></span>
+          </button>
+          <button @click="scanNow()" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-700 hover:bg-gray-600 transition-colors">
+            Scan now
+          </button>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script>
+    function agentControl() {
+      return {
+        running: {{ 'true' if agent_running is defined and agent_running else 'false' }},
+        async toggleAgent() {
+          const endpoint = this.running ? '/api/agent/stop' : '/api/agent/start';
+          await fetch(endpoint, { method: 'POST' });
+          const status = await fetch('/api/agent/status').then(r => r.json());
+          this.running = status.running;
+        },
+        async scanNow() {
+          await fetch('/api/agent/scan-now', { method: 'POST' });
+        }
+      }
+    }
+  </script>
+</body>
+</html>

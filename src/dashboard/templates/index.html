@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+{% block title %}Deals — Resellify{% endblock %}
+{% block content %}
+
+<!-- Stats bar -->
+<div class="grid grid-cols-3 gap-4 mb-6">
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+    <div class="text-2xl font-bold text-white">{{ stats.total_deals }}</div>
+    <div class="text-xs text-gray-400 mt-0.5">Total deals found</div>
+  </div>
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+    <div class="text-2xl font-bold text-emerald-400">{{ stats.avg_profit_pct }}%</div>
+    <div class="text-xs text-gray-400 mt-0.5">Avg profit margin</div>
+  </div>
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+    <div class="text-2xl font-bold text-indigo-400">{{ stats.avg_score }}</div>
+    <div class="text-xs text-gray-400 mt-0.5">Avg deal score</div>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-5"
+     x-data="{ open: false }">
+  <div class="flex items-center justify-between cursor-pointer" @click="open = !open">
+    <span class="text-sm font-medium text-gray-300">Filters & Sort</span>
+    <svg :class="open ? 'rotate-180' : ''" class="w-4 h-4 text-gray-500 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+    </svg>
+  </div>
+  <form x-show="open" x-cloak method="GET" action="/" class="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">Platform</label>
+      <select name="platform" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200">
+        <option value="" {% if not filters.platform %}selected{% endif %}>All platforms</option>
+        <option value="olx" {% if filters.platform == 'olx' %}selected{% endif %}>OLX</option>
+        <option value="facebook" {% if filters.platform == 'facebook' %}selected{% endif %}>Facebook</option>
+        <option value="ebay" {% if filters.platform == 'ebay' %}selected{% endif %}>eBay</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">Category</label>
+      <select name="category" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200">
+        <option value="">All categories</option>
+        {% for cat in categories %}
+        <option value="{{ cat }}" {% if filters.category == cat %}selected{% endif %}>{{ cat }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">Min score</label>
+      <input type="number" name="min_score" min="0" max="100" value="{{ filters.min_score }}"
+        class="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200" />
+    </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">Min profit %</label>
+      <input type="number" name="min_profit" min="0" max="100" value="{{ filters.min_profit }}"
+        class="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200" />
+    </div>
+    <div>
+      <label class="block text-xs text-gray-500 mb-1">Sort by</label>
+      <select name="sort" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-gray-200">
+        <option value="score" {% if filters.sort == 'score' %}selected{% endif %}>Deal score</option>
+        <option value="profit" {% if filters.sort == 'profit' %}selected{% endif %}>Profit %</option>
+        <option value="profit_ron" {% if filters.sort == 'profit_ron' %}selected{% endif %}>Profit RON</option>
+        <option value="newest" {% if filters.sort == 'newest' %}selected{% endif %}>Newest</option>
+      </select>
+    </div>
+    <div class="col-span-2 sm:col-span-3 lg:col-span-5 flex gap-2 pt-1">
+      <button type="submit" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors">
+        Apply
+      </button>
+      <a href="/" class="px-4 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition-colors">
+        Reset
+      </a>
+    </div>
+  </form>
+</div>
+
+<!-- Deal count -->
+<div class="flex items-center justify-between mb-3">
+  <p class="text-sm text-gray-400">
+    Showing <span class="text-white font-medium">{{ deals|length }}</span> of
+    <span class="text-white font-medium">{{ pagination.total }}</span> deals
+  </p>
+  <p class="text-xs text-gray-600">Page {{ pagination.page }} / {{ pagination.total_pages }}</p>
+</div>
+
+<!-- Deals grid -->
+{% if deals %}
+<div class="space-y-3">
+  {% for item in deals %}
+  {% set listing = item.listing %}
+  {% set score = item.score %}
+  {% set grade = score.total_score | int %}
+  {% if grade >= 85 %}{% set gc = 'emerald' %}{% set gl = 'S' %}
+  {% elif grade >= 72 %}{% set gc = 'green' %}{% set gl = 'A' %}
+  {% elif grade >= 58 %}{% set gc = 'yellow' %}{% set gl = 'B' %}
+  {% elif grade >= 45 %}{% set gc = 'orange' %}{% set gl = 'C' %}
+  {% else %}{% set gc = 'red' %}{% set gl = 'D' %}{% endif %}
+
+  <div class="bg-gray-900 border border-gray-800 hover:border-gray-700 rounded-xl p-4 transition-colors group">
+    <div class="flex items-start gap-4">
+
+      <!-- Image -->
+      {% if listing.images %}
+      <a href="/deal/{{ listing.id }}" class="flex-shrink-0">
+        <img src="{{ listing.images[0] }}" alt="{{ listing.title }}"
+          class="w-20 h-20 object-cover rounded-lg bg-gray-800" loading="lazy"
+          onerror="this.style.display='none'" />
+      </a>
+      {% endif %}
+
+      <!-- Main info -->
+      <div class="flex-1 min-w-0">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <a href="/deal/{{ listing.id }}" class="font-medium text-white hover:text-indigo-300 transition-colors line-clamp-2 leading-snug">
+              {{ listing.title }}
+            </a>
+            <div class="flex items-center flex-wrap gap-1.5 mt-1.5">
+              <!-- Platform badge -->
+              <span class="text-xs px-1.5 py-0.5 rounded font-mono
+                {% if listing.platform == 'olx' %}bg-blue-900 text-blue-300
+                {% elif listing.platform == 'facebook' %}bg-indigo-900 text-indigo-300
+                {% else %}bg-amber-900 text-amber-300{% endif %}">
+                {{ listing.platform | upper }}
+              </span>
+              {% if listing.category %}
+              <span class="text-xs text-gray-500">{{ listing.category }}</span>
+              {% endif %}
+              {% if listing.condition and listing.condition != 'unknown' %}
+              <span class="text-xs text-gray-500">• {{ listing.condition }}</span>
+              {% endif %}
+              {% if listing.location %}
+              <span class="text-xs text-gray-500">• {{ listing.location }}</span>
+              {% endif %}
+            </div>
+          </div>
+
+          <!-- Score badge -->
+          <div class="flex-shrink-0 text-center">
+            <div class="grade-{{ gl }} w-12 h-12 rounded-xl flex flex-col items-center justify-center">
+              <div class="text-xs font-bold text-white/80 leading-none">{{ gl }}</div>
+              <div class="text-sm font-bold text-white leading-none">{{ score.total_score | int }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Price + profit row -->
+        <div class="flex items-center flex-wrap gap-4 mt-3">
+          <div>
+            <div class="text-xs text-gray-500">Asking</div>
+            <div class="text-lg font-bold text-white">{{ score.asking_price_ron | int }} RON</div>
+          </div>
+          <div class="text-gray-700">→</div>
+          <div>
+            <div class="text-xs text-gray-500">Est. value</div>
+            <div class="text-lg font-semibold text-gray-300">{{ score.estimated_value_ron | int }} RON</div>
+          </div>
+          <div class="ml-auto text-right">
+            <div class="text-xs text-gray-500">Profit</div>
+            <div class="text-xl font-bold text-emerald-400">+{{ score.estimated_profit_ron | int }} RON</div>
+            <div class="text-xs text-emerald-600">{{ score.profit_percent | int }}%</div>
+          </div>
+        </div>
+
+        <!-- Score breakdown mini -->
+        <div class="flex items-center gap-3 mt-3">
+          <div class="flex items-center gap-1 text-xs text-gray-500">
+            <span>Profit</span>
+            <div class="w-12 bg-gray-800 rounded-full h-1">
+              <div class="bg-emerald-500 h-1 rounded-full" style="width: {{ score.profit_score | int }}%"></div>
+            </div>
+            <span class="text-gray-400">{{ score.profit_score | int }}</span>
+          </div>
+          <div class="flex items-center gap-1 text-xs text-gray-500">
+            <span>Demand</span>
+            <div class="w-12 bg-gray-800 rounded-full h-1">
+              <div class="bg-blue-500 h-1 rounded-full" style="width: {{ score.demand_score | int }}%"></div>
+            </div>
+            <span class="text-gray-400">{{ score.demand_score | int }}</span>
+          </div>
+          <div class="flex items-center gap-1 text-xs text-gray-500">
+            <span>Confidence</span>
+            <div class="w-12 bg-gray-800 rounded-full h-1">
+              <div class="bg-purple-500 h-1 rounded-full" style="width: {{ score.confidence_score | int }}%"></div>
+            </div>
+            <span class="text-gray-400">{{ score.confidence_score | int }}</span>
+          </div>
+          <div class="ml-auto flex items-center gap-2">
+            <a href="{{ listing.url }}" target="_blank" rel="noopener"
+               class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
+              View listing ↗
+            </a>
+            <a href="/deal/{{ listing.id }}" class="text-xs text-gray-500 hover:text-gray-300 transition-colors">
+              Details
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Pagination -->
+{% if pagination.total_pages > 1 %}
+<div class="flex items-center justify-center gap-2 mt-6">
+  {% if pagination.page > 1 %}
+  <a href="?page={{ pagination.page - 1 }}&platform={{ filters.platform }}&category={{ filters.category }}&min_score={{ filters.min_score }}&min_profit={{ filters.min_profit }}&sort={{ filters.sort }}"
+     class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition-colors">
+    ← Prev
+  </a>
+  {% endif %}
+  <span class="text-sm text-gray-500">{{ pagination.page }} / {{ pagination.total_pages }}</span>
+  {% if pagination.page < pagination.total_pages %}
+  <a href="?page={{ pagination.page + 1 }}&platform={{ filters.platform }}&category={{ filters.category }}&min_score={{ filters.min_score }}&min_profit={{ filters.min_profit }}&sort={{ filters.sort }}"
+     class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm transition-colors">
+    Next →
+  </a>
+  {% endif %}
+</div>
+{% endif %}
+
+{% else %}
+<div class="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
+  <div class="text-4xl mb-3">🔍</div>
+  <div class="text-lg font-medium text-gray-300 mb-1">No deals found yet</div>
+  <div class="text-sm text-gray-500 mb-4">Start the agent or trigger a scan to discover resell opportunities.</div>
+  <button onclick="fetch('/api/agent/scan-now', {method:'POST'})"
+    class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors">
+    Scan now
+  </button>
+</div>
+{% endif %}
+
+{% endblock %}

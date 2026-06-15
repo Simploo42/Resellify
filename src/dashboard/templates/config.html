@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Config — Resellify{% endblock %}
+{% block content %}
+
+<div class="max-w-3xl">
+  <div class="flex items-center justify-between mb-5">
+    <h1 class="text-lg font-bold text-white">Configuration</h1>
+    {% if request.query_params.get('saved') %}
+    <span class="text-xs text-emerald-400 bg-emerald-900/30 px-3 py-1.5 rounded-lg">Config saved!</span>
+    {% endif %}
+  </div>
+
+  {% if error %}
+  <div class="bg-red-900/30 border border-red-800 text-red-300 text-sm rounded-lg px-4 py-3 mb-4">
+    {{ error }}
+  </div>
+  {% endif %}
+
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 mb-4">
+    <p class="text-sm text-gray-400 mb-4">
+      Edit <code class="text-indigo-400">config/settings.yaml</code> directly below.
+      Changes take effect on the next scan.
+    </p>
+
+    <form method="POST" action="/config">
+      <textarea name="config_text" rows="40"
+        class="w-full bg-gray-950 border border-gray-700 rounded-lg px-4 py-3 text-sm font-mono text-gray-200 focus:outline-none focus:border-indigo-500 resize-y"
+        spellcheck="false">{{ config_text }}</textarea>
+
+      <div class="flex gap-3 mt-4">
+        <button type="submit"
+          class="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors">
+          Save config
+        </button>
+        <a href="/"
+          class="px-5 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition-colors">
+          Back to deals
+        </a>
+      </div>
+    </form>
+  </div>
+
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
+    <h3 class="text-sm font-medium text-gray-300 mb-3">Quick reference</h3>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-gray-500">
+      <div>
+        <div class="text-gray-400 font-medium mb-1">Scoring weights (must sum to 1.0)</div>
+        <div>profit · demand · confidence · risk</div>
+        <div class="mt-1">Default: 0.40 · 0.35 · 0.15 · 0.10</div>
+      </div>
+      <div>
+        <div class="text-gray-400 font-medium mb-1">Deal grades</div>
+        <div>S ≥ 85 · A ≥ 72 · B ≥ 58 · C ≥ 45 · D &lt; 45</div>
+      </div>
+      <div>
+        <div class="text-gray-400 font-medium mb-1">Exchange rates</div>
+        <div>Update eur_to_ron_rate and usd_to_ron_rate periodically</div>
+      </div>
+      <div>
+        <div class="text-gray-400 font-medium mb-1">OLX location slugs</div>
+        <div>bucuresti · cluj-napoca · timisoara · iasi · constanta</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
