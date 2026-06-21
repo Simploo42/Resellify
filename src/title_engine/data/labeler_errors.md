@@ -26,4 +26,20 @@ Format: `## YYYY-MM-DD — <brief description>` + correction rule.
 - "Pro Max" vs "Pro" + "Max": always a single VARIANT span (B-VARIANT I-VARIANT).
   Never split into two separate spans.
 
-- Numbers before brand names: "2x iPhone" — "2x" → B-QUANTITY, "iphone" → B-BRAND.
+- Numbers before brand names: "2x iPhone" — "2x" → B-QUANTITY, "iphone" → B-MODEL.
+
+---
+
+## 2026-06-21 — iphone/ipad/macbook always MODEL, never BRAND
+
+Systematic error: LLM tagged "iphone" as B-BRAND in ~35 % of occurrences (7/20
+sampled records). "iphone", "ipad", "macbook", "airpods", "imac", "ipod", "iwatch"
+are Apple product-line names — they are B-MODEL tokens.
+
+Correction rule added to DISAMBIGUATION:
+  "iphone 13" (no apple present) → B-MODEL I-MODEL
+  "apple iphone 13" → B-BRAND B-MODEL I-MODEL
+  NEVER tag iphone/ipad/macbook/airpods as B-BRAND.
+
+Also fixed: tokenizer `_DIGIT_HYPHEN_ALPHA_RE` now splits "P5-iPhone" →
+["p5", "iphone"] so both tokens are individually labelable.

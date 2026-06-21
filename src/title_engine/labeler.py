@@ -72,6 +72,11 @@ _SYSTEM_PROMPT = textwrap.dedent("""\
     DISAMBIGUATION (critical):
     - A brand word used as a colour/fruit/common word is NOT a brand.
       "orange" as a colour → B-COLOR. "apple iphone" → apple is B-BRAND.
+    - Apple PRODUCT LINES (iphone, ipad, macbook, airpods, imac, ipod, iwatch)
+      are always B-MODEL — they name a product line, NOT the brand itself.
+      "apple" alone or before a product name → B-BRAND.
+      "iphone 13" (no "apple" present) → B-MODEL I-MODEL. NEVER tag iphone as B-BRAND.
+      "apple iphone 13" → B-BRAND B-MODEL I-MODEL.
     - If a token could be VARIANT or DIMENSION, prefer DIMENSION for
       measured units (W, mm, ", Hz, GB-of-RAM) and VARIANT for product
       storage/trim (the phone's "128GB", "Pro Max").

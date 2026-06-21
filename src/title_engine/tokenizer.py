@@ -20,6 +20,10 @@ _SEP_RE = re.compile(r'[_]{1,}|/{1,}|\|{1,}|•|—|–')
 # Does NOT fire on words like "Galaxy", "Max", "Xbox".
 _DIGIT_X_DIGIT_RE = re.compile(r'(\d)\s*[xX×]\s*(\d)')
 
+# Pad hyphen when it connects a digit to a letter: "P5-iPhone" → "P5 iPhone",
+# "3080-Ti" → "3080 Ti". Does NOT fire on purely alpha compounds like "Wi-Fi".
+_DIGIT_HYPHEN_ALPHA_RE = re.compile(r'(\d)-([A-Za-z])')
+
 # Pad punctuation ONLY when it is NOT between two digits.
 # Negative lookbehind/lookahead for digit so "6.1" / "66,34" survive intact.
 _PUNCT_NOT_BETWEEN_DIGITS = re.compile(r'(?<!\d)[.,](?!\d)|(?<=\d)[.,](?!\d)|(?<!\d)[.,](?=\d)')
@@ -32,6 +36,7 @@ def sanitize(text: str) -> str:
     """Stage-A sanitizer. Returns a cleaned string, NOT yet tokenized."""
     text = _SEP_RE.sub(' ', text)
     text = _DIGIT_X_DIGIT_RE.sub(r'\1 x \2', text)
+    text = _DIGIT_HYPHEN_ALPHA_RE.sub(r'\1 \2', text)
     text = _PUNCT_NOT_BETWEEN_DIGITS.sub(' ', text)
     return _WS_RE.sub(' ', text).strip()
 
