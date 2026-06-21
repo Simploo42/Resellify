@@ -1,0 +1,157 @@
+# Brand gazetteer — one brand per line (lowercase, multi-word ok).
+# Reload at runtime via cross_checker.reload_brands().
+# Extend this list as you see new brands in the scraped data.
+
+# ── Phones & tablets ──────────────────────────────────────────────────────────
+apple
+samsung
+huawei
+xiaomi
+redmi
+poco
+oppo
+oneplus
+realme
+nokia
+motorola
+lenovo
+asus
+rog
+google
+pixel
+sony
+lg
+htc
+blackberry
+honor
+vivo
+tecno
+infinix
+nothing
+
+# ── Laptops & desktops ────────────────────────────────────────────────────────
+dell
+hp
+acer
+asus
+msi
+razer
+toshiba
+fujitsu
+panasonic
+vaio
+surface
+chromebook
+thinkpad
+ideapad
+legion
+predator
+nitro
+zephyrus
+strix
+
+# ── Audio ─────────────────────────────────────────────────────────────────────
+sony
+bose
+jbl
+sennheiser
+audio-technica
+beyerdynamic
+akg
+jabra
+plantronics
+anker
+soundpeats
+edifier
+harman
+kardon
+marshall
+klipsch
+yamaha
+pioneer
+denon
+marantz
+technics
+
+# ── Gaming ────────────────────────────────────────────────────────────────────
+nintendo
+playstation
+xbox
+steam deck
+valve
+corsair
+logitech
+steelseries
+razer
+hyperx
+astro
+turtle beach
+scuf
+nacon
+thrustmaster
+elgato
+
+# ── GPU / CPU ─────────────────────────────────────────────────────────────────
+nvidia
+geforce
+rtx
+gtx
+amd
+radeon
+rx
+intel
+core i
+ryzen
+arc
+quadro
+vega
+
+# ── Cameras ───────────────────────────────────────────────────────────────────
+canon
+nikon
+sony
+fujifilm
+olympus
+panasonic
+leica
+sigma
+tamron
+tokina
+samyang
+godox
+
+# ── TVs & displays ────────────────────────────────────────────────────────────
+lg
+samsung
+philips
+hisense
+tcl
+sharp
+toshiba
+grundig
+beko
+vestel
+sony bravia
+
+# ── Cars (Romania-specific) ───────────────────────────────────────────────────
+dacia
+logan
+sandero
+duster
+renault
+volkswagen
+vw
+bmw
+mercedes
+audi
+opel
+ford
+seat
+skoda
+toyota
+hyundai
+kia
+peugeot
+citroen
+fiat
+volvo
