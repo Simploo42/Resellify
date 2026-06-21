@@ -115,13 +115,22 @@ class HaikuLabeler:
     def __init__(self, model: str = LABELER_MODEL, batch_size: int = BATCH_SIZE):
         self.batch_size = batch_size
         self._version_tag = datetime.utcnow().strftime("%Y-%m")
-        # Resolve backend: OpenRouter takes priority if its key is set
+        # Resolve backend — priority: Gemini > OpenRouter > Anthropic
+        gemini_key = os.environ.get("GEMINI_API_KEY", "")
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if openrouter_key:
+        if gemini_key:
+            from openai import AsyncOpenAI
+            self._backend = "gemini"
+            self._model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+            self._openai_client = AsyncOpenAI(
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                api_key=gemini_key,
+            )
+            self._anthropic_client = None
+        elif openrouter_key:
             from openai import AsyncOpenAI
             self._backend = "openrouter"
-            # Allow overriding via OPENROUTER_MODEL env var (e.g. a free model)
             self._model = os.environ.get("OPENROUTER_MODEL", OPENROUTER_MODEL)
             self._openai_client = AsyncOpenAI(
                 base_url="https://openrouter.ai/api/v1",
@@ -136,7 +145,7 @@ class HaikuLabeler:
             self._anthropic_client = _anthropic.AsyncAnthropic(api_key=anthropic_key)
             self._openai_client = None
         else:
-            raise ValueError("Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY")
+            raise ValueError("Set GEMINI_API_KEY, OPENROUTER_API_KEY, or ANTHROPIC_API_KEY")
 
     async def label_titles(
         self,
@@ -172,7 +181,7 @@ class HaikuLabeler:
         return records
 
     async def _call_api(self, user_msg: str) -> str:
-        if self._backend == "openrouter":
+        if self._backend in ("openrouter", "gemini"):
             for attempt in range(6):
                 try:
                     resp = await self._openai_client.chat.completions.create(
@@ -184,7 +193,13 @@ class HaikuLabeler:
                             {"role": "user", "content": user_msg},
                         ],
                     )
-                    return resp.choices[0].message.content.strip()
+                    if not resp or not resp.choices:
+                        raise ValueError(f"Empty/null response: {resp}")
+                    content = resp.choices[0].message.content
+                    if content is None:
+                        reason = resp.choices[0].finish_reason
+                        raise ValueError(f"Null content from API (finish_reason={reason})")
+                    return content.strip()
                 except Exception as e:
                     msg = str(e)
                     # Parse retry_after from 429 response if available
@@ -230,8 +245,10 @@ class HaikuLabeler:
                 raw_text = raw_text[:rbracket + 1]
             parsed = json.loads(raw_text.strip())
         except Exception as e:
-            snippet = repr(raw_text[:200]) if 'raw_text' in dir() else '<no response>'
+            import traceback as _tb
+            snippet = repr(raw_text[:200]) if raw_text else '<no response>'
             print(f"[Labeler] API/parse error on batch of {len(batch)}: {e} | raw={snippet}", flush=True)
+            _tb.print_exc()
             # Return placeholder records for the whole batch so the pipeline
             # routes them to the spot-check queue rather than crashing.
             return [
