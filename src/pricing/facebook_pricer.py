@@ -7,12 +7,11 @@ the same role OLX plays, but from a second used-market source.
 """
 from __future__ import annotations
 
-import statistics
 from dataclasses import dataclass, field
 from typing import Optional
 
 from ..scrapers.facebook import FacebookMarketplaceScraper
-from .normalize import filter_comparable
+from .normalize import filter_comparable, price_stats, confidence_from_count
 
 
 @dataclass
@@ -44,6 +43,13 @@ class FacebookPricer:
         self._scraper = FacebookMarketplaceScraper(config)
         self._cache: dict[str, FBMarketData] = {}
         self._available: Optional[bool] = None  # None=unknown, False=no cookies
+        # FX rates so EUR/USD FB listings normalize to RON before comparison.
+        self._fx = {
+            "RON": 1.0,
+            "EUR": float(config.get("eur_to_ron_rate", 4.97)),
+            "USD": float(config.get("usd_to_ron_rate", 4.55)),
+            "GBP": float(config.get("gbp_to_ron_rate", 5.75)),
+        }
 
     async def close(self) -> None:
         await self._scraper.close()
@@ -76,7 +82,7 @@ class FacebookPricer:
         entries = [
             FBEntry(
                 title=r.title,
-                price_ron=r.price if r.currency == "RON" else r.price,
+                price_ron=round(r.price * self._fx.get((r.currency or "RON").upper(), 1.0), 2),
                 url=r.url,
                 image=(r.images[0] if r.images else ""),
             )
@@ -95,19 +101,18 @@ class FacebookPricer:
             return result
 
         prices = [e.price_ron for e in entries]
-        n = len(prices)
-        med = statistics.median(prices)
-        avg = sum(prices) / n
-        confidence = min(1.0, 0.25 + n * 0.05)
+        st = price_stats(prices)
+        n = st.count
+        confidence = confidence_from_count(n)
 
         result = FBMarketData(
             query=query,
             listing_count=n,
-            min_price_ron=round(min(prices), 2),
-            max_price_ron=round(max(prices), 2),
-            avg_price_ron=round(avg, 2),
-            median_price_ron=round(med, 2),
-            confidence=round(confidence, 3),
+            min_price_ron=st.min,
+            max_price_ron=st.max,
+            avg_price_ron=st.avg,
+            median_price_ron=st.median,
+            confidence=confidence,
             entries=entries,
         )
         self._cache[cache_key] = result

@@ -36,6 +36,9 @@ class BaseScraper(ABC):
     def __init__(self, config: dict):
         self.config = config
         self.request_delay = config.get("request_delay_seconds", 2.5)
+        # Cap simultaneous in-flight searches so we stay polite to the source
+        # while still overlapping network latency across keywords.
+        self.max_concurrency = max(1, int(config.get("max_concurrent_requests", 4)))
 
     async def _random_delay(self, base: float | None = None):
         delay = base or self.request_delay
@@ -53,18 +56,35 @@ class BaseScraper(ABC):
         ...
 
     async def scrape_all_keywords(self, categories: list[dict]) -> list[RawListing]:
-        all_listings: list[RawListing] = []
-        for cat in categories:
-            if not cat.get("enabled", True):
-                continue
-            for keyword in cat.get("keywords", []):
+        """Search every (category, keyword) pair concurrently under a bounded
+        semaphore. Order is preserved so results remain deterministic."""
+        jobs: list[tuple[str, dict]] = [
+            (keyword, cat)
+            for cat in categories
+            if cat.get("enabled", True)
+            for keyword in cat.get("keywords", [])
+        ]
+        if not jobs:
+            return []
+
+        sem = asyncio.Semaphore(self.max_concurrency)
+
+        async def _run(keyword: str, cat: dict) -> list[RawListing]:
+            async with sem:
                 try:
-                    results = await self.search(keyword, cat)
-                    for r in results:
-                        r.matched_keyword = keyword
-                        r.category = cat.get("name", "")
-                    all_listings.extend(results)
                     await self._random_delay()
+                    results = await self.search(keyword, cat)
                 except Exception as e:
                     logger.info(f"[{self.__class__.__name__}] Error searching '{keyword}': {e}")
+                    return []
+                cat_name = cat.get("name", "")
+                for r in results:
+                    r.matched_keyword = keyword
+                    r.category = cat_name
+                return results
+
+        batches = await asyncio.gather(*(_run(k, c) for k, c in jobs))
+        all_listings: list[RawListing] = []
+        for batch in batches:
+            all_listings.extend(batch)
         return all_listings

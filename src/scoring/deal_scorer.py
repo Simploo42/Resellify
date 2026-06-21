@@ -43,7 +43,9 @@ CONDITION_RISK = {
 }
 
 
-def _grade(score: float) -> str:
+def grade_for(score: float) -> str:
+    """Map a 0-100 deal score to a letter grade. Single source of truth
+    shared by the scorer and the dashboard so they never diverge."""
     if score >= 85:
         return "S"
     if score >= 72:
@@ -53,6 +55,10 @@ def _grade(score: float) -> str:
     if score >= 45:
         return "C"
     return "D"
+
+
+# Backwards-compatible alias.
+_grade = grade_for
 
 
 class DealScorer:
@@ -154,6 +160,15 @@ class DealScorer:
             + self.w_risk * risk_factor
         )
         total = max(0.0, min(100.0, total))
+
+        # ── Liquidity gate ──────────────────────────────────────────────────
+        # No real market signal (no comparable listings and no recorded sales)
+        # means we cannot vouch for resale. Cap the score so a fat paper margin
+        # on an illiquid/unknown item can never present as a strong deal.
+        has_market_signal = sold_count > 0 or recent_sold_30d > 0 or demand_score > 0
+        if not has_market_signal:
+            total = min(total, 45.0)
+            notes.append("No comparable market \u2014 demand unverified, score capped")
 
         return ScoreResult(
             total_score=round(total, 1),

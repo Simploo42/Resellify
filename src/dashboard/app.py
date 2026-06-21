@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import Listing, PriceEstimate, DealScore, ScanLog, get_db, init_db
 from ..agent import load_config, run_scan, start_agent, stop_agent
+from ..scoring.deal_scorer import grade_for
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
@@ -531,23 +532,11 @@ async def deals_json(
             "profit_ron": score.estimated_profit_ron,
             "profit_pct": score.profit_percent,
             "score": score.total_score,
-            "grade": _grade(score.total_score),
+            "grade": grade_for(score.total_score),
             "url": listing.url,
             "scraped_at": listing.scraped_at.isoformat() if listing.scraped_at else None,
         })
     return JSONResponse(deals)
-
-
-def _grade(score: float) -> str:
-    if score >= 85:
-        return "S"
-    if score >= 72:
-        return "A"
-    if score >= 58:
-        return "B"
-    if score >= 45:
-        return "C"
-    return "D"
 
 
 # ── NER Spot-Check routes ──────────────────────────────────────────────────

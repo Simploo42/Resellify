@@ -116,6 +116,8 @@ class DealScore(Base):
     __table_args__ = (
         Index("ix_deal_scores_total_score", "total_score"),
         Index("ix_deal_scores_created_at", "created_at"),
+        Index("ix_deal_scores_profit_percent", "profit_percent"),
+        Index("ix_deal_scores_estimated_profit_ron", "estimated_profit_ron"),
     )
 
 
@@ -174,6 +176,22 @@ async def init_db():
             )
         except Exception:
             pass  # column already exists
+
+        # Ensure performance indexes exist on databases created before they were
+        # added (create_all does not retrofit indexes onto existing tables).
+        _index_ddl = (
+            "CREATE INDEX IF NOT EXISTS ix_deal_scores_profit_percent "
+            "ON deal_scores (profit_percent)",
+            "CREATE INDEX IF NOT EXISTS ix_deal_scores_estimated_profit_ron "
+            "ON deal_scores (estimated_profit_ron)",
+            "CREATE INDEX IF NOT EXISTS ix_listings_category ON listings (category)",
+        )
+        _text = __import__("sqlalchemy").text
+        for _ddl in _index_ddl:
+            try:
+                await conn.execute(_text(_ddl))
+            except Exception:
+                pass
 
 
 async def get_db() -> AsyncSession:

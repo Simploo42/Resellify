@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 import httpx
 from bs4 import BeautifulSoup
 
-from .normalize import filter_comparable
+from .normalize import filter_comparable, price_stats, confidence_from_count
 
 HEADERS = {
     "User-Agent": (
@@ -127,16 +127,6 @@ def _extract_prices(soup: BeautifulSoup) -> list[EmagListing]:
     return listings
 
 
-def _stats(prices: list[float]) -> tuple[float, float, float, float]:
-    """Returns (min, max, avg, median)."""
-    if not prices:
-        return 0.0, 0.0, 0.0, 0.0
-    s = sorted(prices)
-    n = len(s)
-    median = (s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2)
-    return s[0], s[-1], sum(s) / n, median
-
-
 class EmagPricer:
     def __init__(self, timeout: float = 12.0):
         self._timeout = timeout
@@ -148,6 +138,7 @@ class EmagPricer:
                 headers=HEADERS,
                 timeout=self._timeout,
                 follow_redirects=True,
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
             )
         return self._client
 
@@ -190,17 +181,17 @@ class EmagPricer:
         )
 
         prices = [l.price_ron for l in listings]
-        mn, mx, avg, med = _stats(prices)
-        n = len(prices)
-        confidence = min(1.0, 0.3 + n * 0.07)  # 0.3 base, +0.07 per listing, cap 1.0
+        st = price_stats(prices)
+        n = st.count
+        confidence = confidence_from_count(n, base=0.3, per_item=0.07)
 
         return EmagMarketData(
             query=query,
             listing_count=n,
-            min_price_ron=round(mn, 2),
-            max_price_ron=round(mx, 2),
-            avg_price_ron=round(avg, 2),
-            median_price_ron=round(med, 2),
-            confidence=round(confidence, 3),
+            min_price_ron=st.min,
+            max_price_ron=st.max,
+            avg_price_ron=st.avg,
+            median_price_ron=st.median,
+            confidence=confidence,
             listings=listings,
         )

@@ -144,6 +144,8 @@ class OLXMCPScraper(BaseScraper):
     def __init__(self, config: dict):
         super().__init__(config)
         self.domain = "olx.ro"  # OLX Romania (server enum: olx.pt/pl/bg/ro/ua)
+        # A single stdio MCP client is shared serially; never fan out requests.
+        self.max_concurrency = 1
         self.location = config.get("location", "")
         self.max_pages = config.get("max_pages_per_keyword", 3)
         # Optional path to a locally built server (dist/index.js); else use npx

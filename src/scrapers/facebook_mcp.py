@@ -145,6 +145,9 @@ class FacebookMCPScraper(BaseScraper):
     def __init__(self, config: dict):
         super().__init__(config)
         self.mcp_server_path = config.get("mcp_server_path", "")
+        # Server enforces ~3 req/min and a single stdio client is shared;
+        # keep requests strictly serial.
+        self.max_concurrency = 1
         self.chrome_profile = config.get("chrome_profile", "Default")
         self.radius_km = config.get("radius_km", 50)
         self.max_results = config.get("max_results_per_keyword", 40)

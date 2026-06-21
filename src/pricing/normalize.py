@@ -9,6 +9,8 @@ mispriced outliers.
 from __future__ import annotations
 
 import re
+import statistics
+from dataclasses import dataclass
 
 # Accessory / spare-part keywords (Romanian + English). If a product title is
 # dominated by these and lacks the core product noun, it is almost certainly an
@@ -79,6 +81,35 @@ def iqr_filter(prices: list[float]) -> list[float]:
     lo = q1 - 1.5 * iqr
     hi = q3 + 1.5 * iqr
     return [p for p in s if lo <= p <= hi]
+
+
+@dataclass
+class PriceStats:
+    """Summary statistics over a comparable-price distribution."""
+    count: int = 0
+    min: float = 0.0
+    max: float = 0.0
+    avg: float = 0.0
+    median: float = 0.0
+
+
+def price_stats(prices: list[float]) -> PriceStats:
+    """Compute count/min/max/avg/median for a price list. Empty -> zeros."""
+    if not prices:
+        return PriceStats()
+    n = len(prices)
+    return PriceStats(
+        count=n,
+        min=round(min(prices), 2),
+        max=round(max(prices), 2),
+        avg=round(sum(prices) / n, 2),
+        median=round(statistics.median(prices), 2),
+    )
+
+
+def confidence_from_count(count: int, base: float = 0.25, per_item: float = 0.05) -> float:
+    """Confidence in [0,1] that rises with the number of comparable listings."""
+    return round(min(1.0, base + count * per_item), 3)
 
 
 def price_band(price_hint: float | None,

@@ -11,14 +11,13 @@ cache-friendly (no per-category scraping loop).
 from __future__ import annotations
 
 import re
-import statistics
 from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
 from bs4 import BeautifulSoup
 
-from .normalize import is_accessory
+from .normalize import is_accessory, iqr_filter, price_stats, confidence_from_count
 
 HEADERS = {
     "User-Agent": (
@@ -39,19 +38,6 @@ def _slugify(text: str) -> str:
     text = re.sub(r"[^a-z0-9\s-]", "", text)
     text = re.sub(r"\s+", "-", text.strip())
     return re.sub(r"-+", "-", text)
-
-
-def _iqr_filter(prices: list[float]) -> list[float]:
-    if len(prices) < 4:
-        return prices
-    s = sorted(prices)
-    n = len(s)
-    q1 = s[n // 4]
-    q3 = s[(3 * n) // 4]
-    iqr = q3 - q1
-    lo = q1 - 1.5 * iqr
-    hi = q3 + 1.5 * iqr
-    return [p for p in s if lo <= p <= hi]
 
 
 @dataclass
@@ -97,6 +83,7 @@ class OLXPricer:
                 headers=HEADERS,
                 timeout=self._timeout,
                 follow_redirects=True,
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=8),
             )
         return self._client
 
@@ -222,7 +209,7 @@ class OLXPricer:
         all_entries = deviced or all_entries
 
         all_prices = [e.price_ron for e in all_entries]
-        filtered_prices = _iqr_filter(all_prices)
+        filtered_prices = iqr_filter(all_prices)
         if not filtered_prices:
             filtered_prices = all_prices
 
@@ -230,19 +217,18 @@ class OLXPricer:
         price_set = set(filtered_prices)
         filtered_entries = [e for e in all_entries if e.price_ron in price_set]
 
-        n = len(filtered_prices)
-        med = statistics.median(filtered_prices)
-        avg = sum(filtered_prices) / n
-        confidence = min(1.0, 0.25 + n * 0.05)
+        st = price_stats(filtered_prices)
+        n = st.count
+        confidence = confidence_from_count(n)
 
         result = OLXMarketData(
             query=query,
             listing_count=n,
-            min_price_ron=round(min(filtered_prices), 2),
-            max_price_ron=round(max(filtered_prices), 2),
-            avg_price_ron=round(avg, 2),
-            median_price_ron=round(med, 2),
-            confidence=round(confidence, 3),
+            min_price_ron=st.min,
+            max_price_ron=st.max,
+            avg_price_ron=st.avg,
+            median_price_ron=st.median,
+            confidence=confidence,
             entries=filtered_entries[:20],
         )
         self._cache[cache_key] = result

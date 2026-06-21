@@ -74,17 +74,21 @@ def convert_price_to_ron(price: float, currency: str, config: dict) -> float:
 
 def _demand_from_olx(listing_count: int) -> float:
     """
-    Estimate market presence 0-100 from OLX active similar-listing count.
-    This is a supply-side proxy — more listings means the item exists on the
-    market, not that it sells fast. Keep scores conservative (max 45).
-    0 OLX listings = niche/unknown item (score 10).
+    Estimate market *liquidity* 0-100 from the number of comparable active
+    listings across used marketplaces.
+
+    This is a supply-side proxy: a healthy number of comparable listings means
+    the item is actively traded (easy to research, easy to resell), while zero
+    comparables means an illiquid/unknown item we cannot vouch for. It is NOT
+    a sales-velocity measure, so the ceiling is capped well below 100 and a
+    zero count yields a near-zero score rather than a misleading floor.
     """
+    if listing_count <= 0:  return 0.0    # no comparable market — illiquid/unknown
     if listing_count >= 30: return 45.0
     if listing_count >= 15: return 35.0
     if listing_count >= 7:  return 25.0
     if listing_count >= 3:  return 18.0
-    if listing_count >= 1:  return 12.0
-    return 8.0
+    return 10.0                           # 1-2 listings — very thin
 
 async def process_listing(
     raw: RawListing,
@@ -453,7 +457,22 @@ async def _run_scan(config: dict):
     fb_pricer: Optional[FacebookPricer] = None
     _fb_market = markets.get("facebook", {})
     if _fb_market.get("enabled", False):
-        fb_pricer = FacebookPricer(_fb_market)
+        # Merge FX rates so the FB pricer can normalize EUR/USD to RON.
+        _fb_pricer_cfg = {**_fb_market, **price_config}
+        fb_pricer = FacebookPricer(_fb_pricer_cfg)
+        try:
+            _ok, _why = await fb_pricer._scraper.preflight()
+            if _ok:
+                logger.info("[Agent] Facebook pricing: available")
+            else:
+                logger.info(f"[Agent] Facebook pricing DISABLED \u2014 {_why}")
+                broadcast_pipeline({"type": "warning", "source": "facebook", "msg": _why})
+                await fb_pricer.close()
+                fb_pricer = None
+        except Exception as e:
+            logger.info(f"[Agent] Facebook preflight error: {e}")
+            await fb_pricer.close()
+            fb_pricer = None
     scorer = DealScorer(scoring_cfg)
     active_categories = [c for c in categories if c.get("enabled", True)]
 
@@ -505,6 +524,11 @@ async def _run_scan(config: dict):
         if not fb_listings:
             fb = FacebookMarketplaceScraper(fb_cfg)
             try:
+                _ok, _why = await fb.preflight()
+                if not _ok:
+                    logger.info(f"[Agent] Facebook scraping skipped \u2014 {_why}")
+                    broadcast_pipeline({"type": "warning", "source": "facebook", "msg": _why})
+                    return []
                 fb_listings = await fb.scrape_all_keywords(active_categories)
             finally:
                 await fb.close()

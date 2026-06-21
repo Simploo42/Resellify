@@ -15,6 +15,7 @@ How it works:
 Important: pass cookies as a raw Cookie header — httpx's cookie dict
 re-encodes percent-encoded values (e.g. `xs`) and breaks authentication.
 """
+import asyncio
 import json
 import logging
 import os
@@ -121,6 +122,10 @@ class FacebookMarketplaceScraper(BaseScraper):
         self._cookie_header: Optional[str] = None  # raw Cookie header string
         self._dtsg: Optional[str] = None
         self._jazoest: Optional[str] = None
+        # Facebook is sensitive to bursty traffic; keep concurrency low.
+        self.max_concurrency = max(1, int(config.get("max_concurrent_requests", 2)))
+        # Serialize first-time token + client creation across concurrent searches.
+        self._token_lock = asyncio.Lock()
 
     # ── Cookie loading ─────────────────────────────────────────────────────────
 
@@ -148,12 +153,25 @@ class FacebookMarketplaceScraper(BaseScraper):
     async def _ensure_client(self) -> Optional[httpx.AsyncClient]:
         if self._client:
             return self._client
+        async with self._token_lock:
+            return self._make_client()
+
+    def _make_client(self) -> Optional[httpx.AsyncClient]:
+        """Create the shared client (caller must hold _token_lock)."""
+        if self._client:
+            return self._client
         cookie_hdr = self._build_cookie_header()
         if not cookie_hdr:
             return None
         self._cookie_header = cookie_hdr
-        # Do NOT pass cookies to the client — they go as a raw header per request
-        self._client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
+        # Cookies go as a raw header per request (not the cookie jar) to avoid
+        # double-encoding. Pool limits avoid a new connection per search.
+        self._client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=30.0,
+            limits=httpx.Limits(max_connections=self.max_concurrency,
+                                max_keepalive_connections=self.max_concurrency),
+        )
         return self._client
 
     def _base_headers(self, extra: dict | None = None) -> dict:
@@ -168,30 +186,32 @@ class FacebookMarketplaceScraper(BaseScraper):
         """GET the marketplace page, extract dtsg + jazoest CSRF tokens."""
         if self._dtsg and self._jazoest:
             return True
-        client = await self._ensure_client()
-        if not client:
-            return False
-        try:
-            resp = await client.get(f"{_BASE}/marketplace/", headers=self._base_headers())
-            html = resp.text
-
-            # dtsg: wlct.init({"dtsg":"TOKEN:23:...", ...})
-            dtsg_m = re.search(r'"dtsg":"([^"]+)"', html)
-            # jazoest (sprinkle value) — the secondary CSRF parameter
-            jazoest_m = re.search(r'"sprinkleValue":"([^"]+)"', html)
-
-            if dtsg_m:
-                self._dtsg = dtsg_m.group(1)
-            if jazoest_m:
-                self._jazoest = jazoest_m.group(1)
-
-            if not self._dtsg:
-                logger.info("[Facebook] Could not extract dtsg token — cookies may be expired.")
+        async with self._token_lock:
+            # Re-check after acquiring the lock — another coroutine may have
+            # populated the tokens while we waited.
+            if self._dtsg and self._jazoest:
+                return True
+            client = self._make_client()
+            if not client:
                 return False
-            return True
-        except Exception as e:
-            logger.info(f"[Facebook] Token fetch error: {e}")
-            return False
+            try:
+                resp = await client.get(f"{_BASE}/marketplace/", headers=self._base_headers())
+                html = resp.text
+                # dtsg: wlct.init({"dtsg":"TOKEN:23:...", ...})
+                dtsg_m = re.search(r'"dtsg":"([^"]+)"', html)
+                # jazoest (sprinkle value) — the secondary CSRF parameter
+                jazoest_m = re.search(r'"sprinkleValue":"([^"]+)"', html)
+                if dtsg_m:
+                    self._dtsg = dtsg_m.group(1)
+                if jazoest_m:
+                    self._jazoest = jazoest_m.group(1)
+                if not self._dtsg:
+                    logger.info("[Facebook] Could not extract dtsg token — cookies may be expired.")
+                    return False
+                return True
+            except Exception as e:
+                logger.info(f"[Facebook] Token fetch error: {e}")
+                return False
 
     # ── Main search ────────────────────────────────────────────────────────────
 
@@ -387,6 +407,19 @@ class FacebookMarketplaceScraper(BaseScraper):
 
     async def get_listing_detail(self, url: str) -> dict:
         return {}
+
+    async def preflight(self) -> tuple[bool, str]:
+        """Check whether the scraper can actually talk to Facebook.
+        Returns (ok, reason). Distinguishes config vs auth failures so the
+        operator knows what to fix instead of silently getting zero results."""
+        if not os.path.exists(self.cookies_file):
+            return False, (f"no cookie file at {self.cookies_file} \u2014 export your "
+                           "Facebook session cookies (Cookie-Editor, JSON)")
+        if self._make_client() is None:
+            return False, "cookie file present but empty/invalid"
+        if not await self._get_tokens():
+            return False, "could not obtain CSRF tokens \u2014 cookies likely expired"
+        return True, "ok"
 
     async def close(self):
         if self._client:

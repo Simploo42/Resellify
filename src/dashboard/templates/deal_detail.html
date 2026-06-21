@@ -177,7 +177,8 @@
           {% if entries %}
           <button @click="open = !open"
                   class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors ml-2"
-                  x-text="open ? 'hide sources ▲' : 'show sources ▼'"></button>
+                  :aria-expanded="open" aria-label="Toggle {{ entries | length }} comparable source listings"
+                  x-text="open ? 'hide {{ entries | length }} sources' : 'show {{ entries | length }} sources'"></button>
           {% endif %}
         </div>
         {% if est.llm_reasoning %}

@@ -232,10 +232,15 @@
 
           <!-- Score badge -->
           <div class="flex-shrink-0 text-center">
-            <div class="grade-{{ gl }} w-12 h-12 rounded-xl flex flex-col items-center justify-center">
+            <div class="grade-{{ gl }} w-12 h-12 rounded-xl flex flex-col items-center justify-center"
+                 role="img" title="Grade {{ gl }} - deal score {{ score.total_score | int }}/100"
+                 aria-label="Grade {{ gl }}, deal score {{ score.total_score | int }} out of 100">
               <div class="text-xs font-bold text-white/80 leading-none">{{ gl }}</div>
               <div class="text-sm font-bold text-white leading-none">{{ score.total_score | int }}</div>
             </div>
+            {% if score.demand_score | int == 0 %}
+            <div class="mt-1 text-[10px] text-amber-400" title="No comparable listings found - demand unverified">thin market</div>
+            {% endif %}
           </div>
         </div>
 
@@ -245,7 +250,7 @@
             <div class="text-xs text-gray-500">Asking</div>
             <div class="text-lg font-bold text-white">{{ score.asking_price_ron | int }} RON</div>
           </div>
-          <div class="text-gray-700">→</div>
+          <div class="text-gray-700" aria-hidden="true">&rarr;</div>
           <div>
             <div class="text-xs text-gray-500">Est. value</div>
             <div class="text-lg font-semibold text-gray-300">{{ score.estimated_value_ron | int }} RON</div>
@@ -268,7 +273,9 @@
           </div>
           <div class="flex items-center gap-1 text-xs text-gray-500">
             <span>Demand</span>
-            <div class="w-12 bg-gray-800 rounded-full h-1">
+            <div class="w-12 bg-gray-800 rounded-full h-1" role="progressbar"
+                 aria-label="Demand score {{ score.demand_score | int }} of 100"
+                 aria-valuenow="{{ score.demand_score | int }}" aria-valuemin="0" aria-valuemax="100">
               <div class="bg-blue-500 h-1 rounded-full" style="width: {{ score.demand_score | int }}%"></div>
             </div>
             <span class="text-gray-400">{{ score.demand_score | int }}</span>

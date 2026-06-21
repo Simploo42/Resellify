@@ -14,6 +14,8 @@ markets:
     max_pages_per_keyword: 1
     # Delay between requests in seconds (respect rate limits)
     request_delay_seconds: 1.0
+    # Max simultaneous in-flight keyword searches (bounded concurrency)
+    max_concurrent_requests: 4
 
   facebook:
     enabled: true
@@ -29,6 +31,9 @@ markets:
     radius_km: 50
     scan_interval_minutes: 60
     max_results_per_keyword: 40
+    # Facebook is sensitive to bursts \u2014 keep this low.
+    # Facebook is sensitive to bursts - keep this low.
+    max_concurrent_requests: 2
 
   ebay:
     enabled: true
