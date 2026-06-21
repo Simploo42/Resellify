@@ -83,7 +83,7 @@ class TitleEnginePipeline:
             item["prefilled_tags"] = prefill(tokens)
 
         # ── Step 3: label with Haiku ───────────────────────────────────────────
-        print(f"[Pipeline] Labeling {len(unique)} titles with {self.labeler.model}…")
+        print(f"[Pipeline] Labeling {len(unique)} titles with {self.labeler._model}…")
         records = await self.labeler.label_titles(unique)
         print(f"[Pipeline] Labeling done. {len(records)} records received.")
 

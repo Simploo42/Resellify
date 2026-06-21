@@ -11,13 +11,13 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Optional
 
-import anthropic
-
 from .tokenizer import tokenize, TOKENIZER_VERSION, SCHEMA_VERSION, VALID_LABELS
 
 LABELER_MODEL = "claude-haiku-4-5-20251001"
-BATCH_SIZE = 8          # titles per API call
-CONFIDENCE_FLOOR = 0.75 # below this → spot-check queue
+# OpenRouter model name for the same model
+OPENROUTER_MODEL = "anthropic/claude-haiku-4-5"
+BATCH_SIZE = 8
+CONFIDENCE_FLOOR = 0.75
 
 
 @dataclass
@@ -107,18 +107,29 @@ def _build_user_message(batch: list[dict]) -> str:
 
 class HaikuLabeler:
     def __init__(self, model: str = LABELER_MODEL, batch_size: int = BATCH_SIZE):
-        self.model = model
         self.batch_size = batch_size
-        self._client: Optional[anthropic.AsyncAnthropic] = None
         self._version_tag = datetime.utcnow().strftime("%Y-%m")
-
-    def _get_client(self) -> anthropic.AsyncAnthropic:
-        if not self._client:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not api_key:
-                raise ValueError("ANTHROPIC_API_KEY not set")
-            self._client = anthropic.AsyncAnthropic(api_key=api_key)
-        return self._client
+        # Resolve backend: OpenRouter takes priority if its key is set
+        openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if openrouter_key:
+            from openai import AsyncOpenAI
+            self._backend = "openrouter"
+            self._model = OPENROUTER_MODEL
+            self._openai_client = AsyncOpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=openrouter_key,
+                default_headers={"HTTP-Referer": "https://github.com/simploo42/resellify"},
+            )
+            self._anthropic_client = None
+        elif anthropic_key:
+            import anthropic as _anthropic
+            self._backend = "anthropic"
+            self._model = model
+            self._anthropic_client = _anthropic.AsyncAnthropic(api_key=anthropic_key)
+            self._openai_client = None
+        else:
+            raise ValueError("Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY")
 
     async def label_titles(
         self,
@@ -149,19 +160,33 @@ class HaikuLabeler:
 
         return records
 
-    async def _label_batch(self, batch: list[dict]) -> list[LabelRecord]:
-        client = self._get_client()
-        user_msg = _build_user_message(batch)
-
-        try:
-            resp = await client.messages.create(
-                model=self.model,
+    async def _call_api(self, user_msg: str) -> str:
+        if self._backend == "openrouter":
+            resp = await self._openai_client.chat.completions.create(
+                model=self._model,
+                max_tokens=1024,
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+            )
+            return resp.choices[0].message.content.strip()
+        else:
+            resp = await self._anthropic_client.messages.create(
+                model=self._model,
                 max_tokens=1024,
                 temperature=0,
                 system=_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_msg}],
             )
-            raw_text = resp.content[0].text.strip()
+            return resp.content[0].text.strip()
+
+    async def _label_batch(self, batch: list[dict]) -> list[LabelRecord]:
+        user_msg = _build_user_message(batch)
+
+        try:
+            raw_text = await self._call_api(user_msg)
             # Strip accidental markdown fences
             if raw_text.startswith("```"):
                 raw_text = raw_text.split("```")[1]

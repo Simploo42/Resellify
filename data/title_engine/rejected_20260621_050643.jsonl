@@ -1,0 +1,1 @@
+{"id": "olx:302969429", "raw": "Telefon Samsung S10+", "tokens": ["telefon", "samsung", "s10+"], "tags": ["O", "B-BRAND", "B-MODEL", "I-MODEL"], "confidence": 0.94, "uncertain_idx": [], "prefilled_spans": ["O", "B-BRAND", "O"], "labeler": "claude-haiku-4-5-20251001", "labeler_version": "2026-06", "schema_version": "v1", "repairs": [], "needs_review": false}
