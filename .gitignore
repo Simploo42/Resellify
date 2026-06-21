@@ -23,3 +23,6 @@ playwright-report/
 
 # Local scratch (hardcoded local MCP build path)
 test_olx.py
+
+# Trained model weights (large binaries — ship via model registry or DVC)
+models/
