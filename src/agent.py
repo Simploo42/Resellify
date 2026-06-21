@@ -5,10 +5,11 @@ import asyncio
 import logging
 import time
 from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import yaml
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func, delete
 
 from .db.models import (
     AsyncSessionLocal, Listing, PriceEstimate, DealScore, ScanLog,
@@ -16,6 +17,7 @@ from .db.models import (
 )
 from .events import broadcast_deal, broadcast_pipeline
 from .scrapers.base import RawListing
+from .notifications import Notifier
 from .scrapers.olx_mcp import OLXMCPScraper
 from .scrapers.olx import OLXScraper                    # HTTP (httpx+BS4) fallback
 from .scrapers.facebook_mcp import FacebookMCPScraper   # MCP primary
@@ -62,6 +64,68 @@ def load_config(path: str = "config/settings.yaml") -> dict:
         return yaml.safe_load(f)
 
 
+def validate_config(config: dict) -> list[str]:
+    """Return a list of human-readable problems with `config`. Empty == valid.
+    Catches the mistakes that otherwise fail silently or mid-scan: malformed
+    structure, scoring weights that don't sum to 1, and broken price ranges.
+    """
+    errors: list[str] = []
+    if not isinstance(config, dict):
+        return ["config root must be a mapping"]
+
+    # ── scoring weights ──────────────────────────────────────────────────────
+    scoring = config.get("scoring") or {}
+    weights = scoring.get("weights") or {}
+    if weights:
+        keys = ("profit", "demand", "confidence", "risk")
+        missing = [k for k in keys if k not in weights]
+        if missing:
+            errors.append(f"scoring.weights missing: {', '.join(missing)}")
+        else:
+            try:
+                total = sum(float(weights[k]) for k in keys)
+                if abs(total - 1.0) > 0.01:
+                    errors.append(
+                        f"scoring.weights must sum to 1.0 (got {total:.2f})")
+            except (TypeError, ValueError):
+                errors.append("scoring.weights must all be numbers")
+
+    # ── markets ──────────────────────────────────────────────────────────────
+    markets = config.get("markets")
+    if not isinstance(markets, dict) or not markets:
+        errors.append("markets section is required")
+
+    # ── categories ───────────────────────────────────────────────────────────
+    categories = config.get("categories")
+    if not isinstance(categories, list) or not categories:
+        errors.append("at least one category is required")
+    else:
+        for i, cat in enumerate(categories):
+            label = cat.get("name", f"#{i}") if isinstance(cat, dict) else f"#{i}"
+            if not isinstance(cat, dict):
+                errors.append(f"category {label} must be a mapping")
+                continue
+            if not cat.get("keywords"):
+                errors.append(f"category '{label}' has no keywords")
+            pr = cat.get("price_range") or {}
+            lo, hi = pr.get("min_ron"), pr.get("max_ron")
+            if lo is not None and hi is not None:
+                try:
+                    if float(lo) >= float(hi):
+                        errors.append(
+                            f"category '{label}' price_range min_ron "
+                            f"({lo}) must be < max_ron ({hi})")
+                except (TypeError, ValueError):
+                    errors.append(f"category '{label}' price_range must be numeric")
+
+    # ── notifications ────────────────────────────────────────────────────────
+    notif = config.get("notifications") or {}
+    if notif.get("telegram_bot_token") and not notif.get("telegram_chat_id"):
+        errors.append("notifications.telegram_bot_token set but telegram_chat_id missing")
+
+    return errors
+
+
 def convert_price_to_ron(price: float, currency: str, config: dict) -> float:
     rates = {
         "RON": 1.0,
@@ -90,6 +154,33 @@ def _demand_from_olx(listing_count: int) -> float:
     if listing_count >= 3:  return 18.0
     return 10.0                           # 1-2 listings — very thin
 
+async def _prune_old_listings(config: dict) -> int:
+    """Delete listings not seen within `agent.max_listing_age_days`, along with
+    their dependent rows. Returns the number of listings removed. A value of 0
+    or less disables pruning."""
+    days = int(config.get("agent", {}).get("max_listing_age_days", 30))
+    if days <= 0:
+        return 0
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    try:
+        async with AsyncSessionLocal() as session:
+            stale = await session.execute(
+                select(Listing.id).where(Listing.last_seen_at < cutoff))
+            ids = [r[0] for r in stale.all()]
+            if not ids:
+                return 0
+            for model in (DealScore, PriceEstimate, PriceChange):
+                await session.execute(
+                    delete(model).where(model.listing_id.in_(ids)))
+            await session.execute(delete(Listing).where(Listing.id.in_(ids)))
+            await session.commit()
+            logger.info(f"[Agent] Pruned {len(ids)} listings older than {days}d")
+            return len(ids)
+    except Exception as e:
+        logger.warning(f"[Agent] Pruning failed: {e}")
+        return 0
+
+
 async def process_listing(
     raw: RawListing,
     emag_pricer: EmagPricer,
@@ -103,6 +194,7 @@ async def process_listing(
     emag_cache: Optional[dict[str, EmagMarketData]] = None,
     olx_cache: Optional[dict[str, OLXMarketData]] = None,
     fb_cache: Optional[dict[str, FBMarketData]] = None,
+    notifier: Optional["Notifier"] = None,
 ) -> bool:
     """
     Price and score a single listing.
@@ -405,7 +497,7 @@ async def process_listing(
         "profit_ron": round(scored.estimated_profit_ron) if is_deal else 0,
     })
     if is_deal:
-        broadcast_deal({
+        deal_payload = {
             "id": raw.listing_id, "title": raw.title, "url": raw.url,
             "platform": raw.platform, "category": raw.category,
             "condition": raw.condition, "location": raw.location,
@@ -416,7 +508,25 @@ async def process_listing(
             "estimated_profit_ron": scored.estimated_profit_ron,
             "profit_percent": scored.profit_percent,
             "ner_entities": ner_entities,
-        })
+        }
+        broadcast_deal(deal_payload)
+        # Push to external channels once per listing (deduped via is_notified).
+        if notifier is not None and notifier.qualifies(scored.total_score):
+            already = False
+            async with AsyncSessionLocal() as session:
+                ds_res = await session.execute(
+                    select(DealScore).where(DealScore.listing_id == raw.listing_id))
+                ds = ds_res.scalar_one_or_none()
+                already = bool(ds and ds.is_notified)
+            if not already:
+                sent = await notifier.notify(deal_payload)
+                if sent:
+                    async with AsyncSessionLocal() as session:
+                        await session.execute(
+                            update(DealScore)
+                            .where(DealScore.listing_id == raw.listing_id)
+                            .values(is_notified=True))
+                        await session.commit()
     return is_deal
 
 
@@ -433,6 +543,7 @@ async def _run_scan(config: dict):
     scoring_cfg = config.get("scoring", {})
     categories = config.get("categories", [])
     markets = config.get("markets", {})
+    scan_started = datetime.utcnow()
     price_config = {
         "usd_to_ron_rate": pricing_cfg.get("usd_to_ron_rate", 4.55),
         "eur_to_ron_rate": pricing_cfg.get("eur_to_ron_rate", 4.97),
@@ -475,6 +586,10 @@ async def _run_scan(config: dict):
             fb_pricer = None
     scorer = DealScorer(scoring_cfg)
     active_categories = [c for c in categories if c.get("enabled", True)]
+
+    notifier = Notifier(config)
+    if notifier.enabled:
+        logger.info(f"[Agent] Notifications enabled (min score {notifier.min_score:.0f})")
 
     # Signal scan started immediately so the pipeline UI opens right away.
     # total=0 here — updated below once scraping is done.
@@ -558,28 +673,78 @@ async def _run_scan(config: dict):
     olx_cache: dict[str, OLXMarketData] = {}
     fb_cache: dict[str, FBMarketData] = {}
     good_deals = 0
-    for i, raw in enumerate(all_listings):
-        broadcast_pipeline({
-            "type": "listing", "idx": i + 1, "total": total,
-            "id": raw.listing_id, "title": raw.title[:70],
-            "platform": raw.platform, "price": raw.price, "currency": raw.currency,
-        })
-        try:
-            is_deal = await process_listing(
-                raw, emag_pricer, olx_pricer, fb_pricer, llm_estimator, scorer,
-                pricing_cfg, scoring_cfg, price_config,
-                emag_cache=emag_cache, olx_cache=olx_cache, fb_cache=fb_cache,
-            )
-            if is_deal:
-                good_deals += 1
-        except Exception as e:
-            logger.info(f"[Agent] Error processing '{raw.title[:50]}': {e}")
-            broadcast_pipeline({"type": "scored", "id": raw.listing_id, "score": 0, "is_deal": False, "error": True})
+    new_count = 0
+    error_count = 0
+
+    # Bound how many listings are priced+scored at once. Each listing fans out
+    # to several HTTP pricing calls, so this overlaps network latency while the
+    # per-query caches still de-duplicate identical lookups across coroutines.
+    concurrency = max(1, int(config.get("agent", {}).get("max_concurrent_listings", 6)))
+    sem = asyncio.Semaphore(concurrency)
+    progress = {"idx": 0}
+
+    async def _process(raw: RawListing) -> bool:
+        nonlocal good_deals, new_count, error_count
+        async with sem:
+            progress["idx"] += 1
+            broadcast_pipeline({
+                "type": "listing", "idx": progress["idx"], "total": total,
+                "id": raw.listing_id, "title": raw.title[:70],
+                "platform": raw.platform, "price": raw.price, "currency": raw.currency,
+            })
+            try:
+                is_deal = await process_listing(
+                    raw, emag_pricer, olx_pricer, fb_pricer, llm_estimator, scorer,
+                    pricing_cfg, scoring_cfg, price_config,
+                    emag_cache=emag_cache, olx_cache=olx_cache, fb_cache=fb_cache,
+                    notifier=notifier,
+                )
+                if is_deal:
+                    good_deals += 1
+                return is_deal
+            except Exception as e:
+                logger.warning(f"[Agent] Error processing '{raw.title[:50]}': {e}")
+                error_count += 1
+                broadcast_pipeline({"type": "scored", "id": raw.listing_id,
+                                    "score": 0, "is_deal": False, "error": True})
+                return False
+
+    await asyncio.gather(*(_process(raw) for raw in all_listings))
 
     await emag_pricer.close()
     await olx_pricer.close()
     if fb_pricer is not None:
         await fb_pricer.close()
+    await notifier.close()
+
+    # ── Persist a scan-history row + prune stale listings ────────────────────
+    scan_completed = datetime.utcnow()
+    duration = (scan_completed - scan_started).total_seconds()
+    try:
+        async with AsyncSessionLocal() as session:
+            # New listings = rows first scraped during this scan window.
+            new_q = await session.execute(
+                select(func.count()).select_from(Listing)
+                .where(Listing.scraped_at >= scan_started))
+            new_count = new_q.scalar() or 0
+            session.add(ScanLog(
+                platform="all",
+                keyword="",
+                category="",
+                listings_found=total,
+                new_listings=new_count,
+                deals_scored=good_deals,
+                errors=[] if error_count == 0 else [f"{error_count} listings errored"],
+                duration_seconds=round(duration, 1),
+                started_at=scan_started,
+                completed_at=scan_completed,
+            ))
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"[Agent] Failed to write ScanLog: {e}")
+
+    await _prune_old_listings(config)
+
     broadcast_pipeline({"type": "scan_done", "deals": good_deals, "total": total})
     logger.info(f"[Agent] Scan complete. Good deals found: {good_deals}/{total}")
     return good_deals
@@ -588,6 +753,10 @@ async def _run_scan(config: dict):
 async def start_agent(config_path: str = "config/settings.yaml"):
     global _running
     config = load_config(config_path)
+    problems = validate_config(config)
+    if problems:
+        for p in problems:
+            logger.warning(f"[Agent] Config issue: {p}")
     await init_db()
     _running = True
     logger.info("[Agent] Starting market watch agent...")

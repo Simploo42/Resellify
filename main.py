@@ -18,10 +18,23 @@ def main():
     parser = argparse.ArgumentParser(description="Resellify — Market resell agent")
     parser.add_argument("--agent", action="store_true", help="Start background scanning agent")
     parser.add_argument("--scan", action="store_true", help="Run a single scan and exit")
+    parser.add_argument("--validate-config", action="store_true",
+                        help="Validate the config file and exit")
     parser.add_argument("--host", default=os.environ.get("DASHBOARD_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT", 8000)))
     parser.add_argument("--config", default="config/settings.yaml")
     args = parser.parse_args()
+
+    if args.validate_config:
+        from src.agent import load_config, validate_config
+        problems = validate_config(load_config(args.config))
+        if problems:
+            print("Config invalid:")
+            for p in problems:
+                print(f"  - {p}")
+            sys.exit(1)
+        print("Config OK")
+        return
 
     if args.scan:
         from src.agent import load_config, run_scan, init_db

@@ -155,6 +155,8 @@ notifications:
 agent:
   # How many concurrent scrapers to run
   max_concurrent_scrapers: 2
+  # How many listings to price+score concurrently (overlaps HTTP latency)
+  max_concurrent_listings: 6
   # Days before re-checking a previously seen listing
   listing_recheck_days: 3
   # Days to keep deals in DB before pruning

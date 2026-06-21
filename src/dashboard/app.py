@@ -20,7 +20,7 @@ from sqlalchemy import select, desc, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import Listing, PriceEstimate, DealScore, ScanLog, get_db, init_db
-from ..agent import load_config, run_scan, start_agent, stop_agent
+from ..agent import load_config, run_scan, start_agent, stop_agent, validate_config
 from ..scoring.deal_scorer import grade_for
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -485,12 +485,17 @@ async def config_page(request: Request):
 @app.post("/config")
 async def save_config(request: Request, config_text: str = Form(...)):
     try:
-        yaml.safe_load(config_text)  # validate
+        parsed = yaml.safe_load(config_text)  # validate syntax
     except yaml.YAMLError as e:
-        return templates.TemplateResponse("config.html", {
-            "request": request,
+        return templates.TemplateResponse(request, "config.html", {
             "config_text": config_text,
             "error": f"Invalid YAML: {e}",
+        })
+    problems = validate_config(parsed)
+    if problems:
+        return templates.TemplateResponse(request, "config.html", {
+            "config_text": config_text,
+            "error": "Config invalid:\n- " + "\n- ".join(problems),
         })
     with open(CONFIG_PATH, "w") as f:
         f.write(config_text)

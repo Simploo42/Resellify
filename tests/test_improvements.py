@@ -185,11 +185,135 @@ def test_fb_currency_normalization():
     check(p._fx.get("RON") == 1.0, "RON identity")
 
 
+# \u2500\u2500 notifications \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+def test_notifier():
+    print("Notifier gating + formatting")
+    from src.notifications import Notifier
+
+    off = Notifier({"notifications": {}})
+    check(off.enabled is False, "no channels -> disabled")
+    check(off.qualifies(100) is False, "disabled never qualifies")
+
+    disc = Notifier({"notifications": {"discord_webhook_url": "http://x",
+                                       "notify_min_score": 75}})
+    check(disc.enabled is True, "discord url -> enabled")
+    check(disc.qualifies(80) is True, "score above threshold qualifies")
+    check(disc.qualifies(70) is False, "score below threshold rejected")
+
+    tg = Notifier({"notifications": {"telegram_bot_token": "t",
+                                     "telegram_chat_id": "c"}})
+    check(tg.enabled is True, "telegram token+chat -> enabled")
+    tg_half = Notifier({"notifications": {"telegram_bot_token": "t"}})
+    check(tg_half.enabled is False, "telegram without chat_id -> disabled")
+
+    summary = Notifier._summary({
+        "title": "PS5", "total_score": 82, "asking_price_ron": 800,
+        "estimated_value_ron": 1500, "estimated_profit_ron": 700,
+        "profit_percent": 46, "platform": "olx", "location": "Cluj",
+    })
+    check("PS5" in summary and "Score 82" in summary, "summary has title+score")
+    check("800 RON" in summary and "+700 RON" in summary, "summary has prices")
+
+
+# \u2500\u2500 config validation \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+def test_validate_config():
+    print("validate_config")
+    from src.agent import validate_config
+
+    good = {
+        "markets": {"olx": {}},
+        "categories": [{"name": "C", "keywords": ["x"],
+                        "price_range": {"min_ron": 100, "max_ron": 500}}],
+        "scoring": {"weights": {"profit": 0.4, "demand": 0.35,
+                                "confidence": 0.15, "risk": 0.1}},
+    }
+    check(validate_config(good) == [], "valid config -> no errors")
+
+    bad_w = {**good, "scoring": {"weights": {"profit": 0.5, "demand": 0.35,
+                                             "confidence": 0.15, "risk": 0.1}}}
+    check(any("sum to 1.0" in e for e in validate_config(bad_w)),
+          "weights not summing to 1 flagged")
+
+    bad_pr = {"markets": {"olx": {}},
+              "categories": [{"name": "C", "keywords": ["x"],
+                             "price_range": {"min_ron": 500, "max_ron": 100}}]}
+    check(any("min_ron" in e for e in validate_config(bad_pr)),
+          "inverted price range flagged")
+
+    check(any("category" in e for e in validate_config({"markets": {"olx": {}}})),
+          "missing categories flagged")
+    check(any("markets" in e for e in validate_config({"categories": good["categories"]})),
+          "missing markets flagged")
+    check(any("telegram_chat_id" in e for e in validate_config({
+              "markets": {"olx": {}}, "categories": good["categories"],
+              "notifications": {"telegram_bot_token": "t"}})),
+          "telegram half-config flagged")
+
+
+# \u2500\u2500 pruning \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+def test_prune_old_listings():
+    print("_prune_old_listings")
+    import os
+    from datetime import datetime, timedelta
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+    import sqlalchemy as sa
+    from src.db import models
+    import src.agent as agent
+
+    db_path = "test_prune_unit.db"
+    if os.path.exists(db_path):
+        os.remove(db_path)
+    eng = create_async_engine(f"sqlite+aiosqlite:///./{db_path}")
+    Session = async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
+
+    async def run():
+        async with eng.begin() as c:
+            await c.run_sync(models.Base.metadata.create_all)
+        now = datetime.utcnow()
+        async with Session() as s:
+            s.add(models.Listing(id="olx:fresh", platform="olx", external_id="1",
+                                 title="fresh", price=10, url="u",
+                                 last_seen_at=now, scraped_at=now))
+            s.add(models.Listing(id="olx:stale", platform="olx", external_id="2",
+                                 title="stale", price=10, url="u",
+                                 last_seen_at=now - timedelta(days=40),
+                                 scraped_at=now - timedelta(days=40)))
+            s.add(models.DealScore(listing_id="olx:stale", total_score=60,
+                                   asking_price_ron=10, estimated_value_ron=20,
+                                   estimated_profit_ron=10, profit_percent=50))
+            await s.commit()
+        orig = agent.AsyncSessionLocal
+        agent.AsyncSessionLocal = Session
+        try:
+            removed = await agent._prune_old_listings({"agent": {"max_listing_age_days": 30}})
+            async with Session() as s:
+                ids = [r[0] for r in (await s.execute(sa.select(models.Listing.id))).all()]
+                ds = [r[0] for r in (await s.execute(sa.select(models.DealScore.listing_id))).all()]
+        finally:
+            agent.AsyncSessionLocal = orig
+            await eng.dispose()
+        return removed, ids, ds
+
+    removed, ids, ds = asyncio.run(run())
+    os.remove(db_path)
+    check(removed == 1, "one stale listing pruned")
+    check(ids == ["olx:fresh"], "fresh listing kept")
+    check(ds == [], "orphan deal score cascaded")
+
+    # Disabled when days <= 0.
+    check(asyncio.run(agent._prune_old_listings({"agent": {"max_listing_age_days": 0}})) == 0,
+          "pruning disabled at days<=0")
+
+
 def main():
     tests = [
         test_price_stats, test_confidence_from_count, test_iqr_filter,
         test_is_accessory, test_demand_proxy, test_liquidity_gate,
         test_grade_dedup, test_concurrent_scrape, test_fb_currency_normalization,
+        test_notifier, test_validate_config, test_prune_old_listings,
     ]
     for t in tests:
         t()

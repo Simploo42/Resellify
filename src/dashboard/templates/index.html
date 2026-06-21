@@ -162,6 +162,26 @@
   </div>
 </div>
 
+{% if recent_scans %}
+<!-- Scan history -->
+<div x-data="{ open: false }" class="bg-gray-900 border border-gray-800 rounded-xl mb-5 overflow-hidden">
+  <div class="flex items-center justify-between px-4 py-2.5 cursor-pointer select-none" @click="open = !open">
+    <span class="text-sm font-medium text-gray-300">Scan history</span>
+    <span class="text-gray-600 text-xs" x-text="open ? '-' : '+'"></span>
+  </div>
+  <div x-show="open" x-cloak class="border-t border-gray-800 divide-y divide-gray-800/60">
+    {% for sc in recent_scans %}
+    <div class="flex items-center gap-3 px-4 py-2 text-xs">
+      <span class="text-gray-500 font-mono shrink-0 w-28">{{ sc.started_at.strftime('%d %b %H:%M') if sc.started_at else '-' }}</span>
+      <span class="flex-1 text-gray-400">{{ sc.listings_found }} listings &rarr; {{ sc.deals_scored }} deals &middot; {{ sc.new_listings }} new</span>
+      {% if sc.errors %}<span class="text-red-500 shrink-0">{{ sc.errors | length }} err</span>{% endif %}
+      <span class="text-gray-600 font-mono shrink-0 w-16 text-right">{{ sc.duration_seconds | int }}s</span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
 <!-- Deals grid -->
 <div id="deals-grid" class="space-y-3">
 {% if deals %}
