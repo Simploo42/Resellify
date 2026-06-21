@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment & secrets
+.env
+facebook_cookies.json
+
+# Database
+*.db
+resellify.db
+
+# Playwright
+playwright-report/
+.cache/
+
+# OS
+.DS_Store
+
+# Local scratch (hardcoded local MCP build path)
+test_olx.py

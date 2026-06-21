@@ -1,19 +1,32 @@
+"""
+OLX Romania scraper via HTTP (httpx + BeautifulSoup) — no browser needed.
+
+This is the lightweight fallback used when the olx-mcp MCP server is
+unavailable. OLX serves listing cards in server-side HTML, so we can parse
+them directly. Uses the system CA store, so it works behind TLS-intercepting
+proxies where headless Chromium would fail.
+
+Approach (and the IQR outlier filter) adapted from kjanus03/olx-scrapper.
+"""
 import re
 import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
-from playwright.async_api import async_playwright, Page, Browser
-from .base import BaseScraper, RawListing
 
-# OLX Romania city slug mapping
-CITY_SLUGS = {
-    "bucuresti": "bucuresti",
-    "cluj-napoca": "cluj-napoca",
-    "timisoara": "timisoara",
-    "iasi": "iasi",
-    "constanta": "constanta",
-    "brasov": "brasov",
-    "": "",  # all Romania
+import httpx
+from bs4 import BeautifulSoup
+
+from .base import BaseScraper, RawListing
+from .filters import filter_price_outliers
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ro-RO,ro;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 CONDITION_MAP = {
@@ -23,196 +36,204 @@ CONDITION_MAP = {
     "deteriorat": "deteriorat",
 }
 
+_DIACRITICS = str.maketrans({"ă": "a", "â": "a", "î": "i", "ș": "s", "ț": "t"})
+
+
+def _slugify(text: str) -> str:
+    text = text.lower().translate(_DIACRITICS)
+    text = re.sub(r"[^a-z0-9\s-]", "", text)
+    text = re.sub(r"\s+", "-", text).strip("-")
+    return re.sub(r"-+", "-", text)
+
 
 def _parse_price(text: str) -> tuple[float, str]:
-    text = text.strip().replace("\xa0", " ").replace(",", ".")
+    text = text.strip().replace("\xa0", " ")
     currency = "RON"
-    if "€" in text or "EUR" in text:
+    if "€" in text or "eur" in text.lower():
         currency = "EUR"
-    elif "$" in text or "USD" in text:
+    elif "$" in text or "usd" in text.lower():
         currency = "USD"
-    digits = re.sub(r"[^\d.]", "", text)
+    # "1 599 lei" -> 1599 ; "1.299,50 €" -> 1299.50
+    cleaned = text.replace(".", "").replace(" ", "").replace(",", ".")
+    digits = re.sub(r"[^\d.]", "", cleaned)
     try:
         return float(digits), currency
     except ValueError:
         return 0.0, currency
 
 
-def _parse_olx_date(text: str) -> Optional[datetime]:
-    text = text.strip().lower()
+_RO_MONTHS = {
+    "ianuarie": 1, "februarie": 2, "martie": 3, "aprilie": 4, "mai": 5,
+    "iunie": 6, "iulie": 7, "august": 8, "septembrie": 9, "octombrie": 10,
+    "noiembrie": 11, "decembrie": 12,
+}
+
+
+def _parse_ro_date(text: str) -> Optional[datetime]:
+    t = text.strip().lower()
     now = datetime.utcnow()
-    if "azi" in text or "today" in text:
+    if "azi" in t:
         return now
-    if "ieri" in text or "yesterday" in text:
+    if "ieri" in t:
         return now - timedelta(days=1)
-    month_map = {
-        "ian": 1, "feb": 2, "mar": 3, "apr": 4, "mai": 5, "iun": 6,
-        "iul": 7, "aug": 8, "sep": 9, "oct": 10, "noi": 11, "dec": 12,
-    }
-    for abbr, num in month_map.items():
-        if abbr in text:
-            day_match = re.search(r"\d+", text)
-            if day_match:
-                try:
-                    return datetime(now.year, num, int(day_match.group()))
-                except ValueError:
-                    pass
+    m = re.search(r"(\d{1,2})\s+([a-zăâîșț]+)(?:\s+(\d{4}))?", t)
+    if m:
+        day = int(m.group(1))
+        month = _RO_MONTHS.get(m.group(2))
+        year = int(m.group(3)) if m.group(3) else now.year
+        if month:
+            try:
+                return datetime(year, month, day)
+            except ValueError:
+                return None
     return None
 
 
 class OLXScraper(BaseScraper):
     def __init__(self, config: dict):
         super().__init__(config)
-        self.base_url = config.get("base_url", "https://www.olx.ro")
+        self.base_url = config.get("base_url", "https://www.olx.ro").rstrip("/")
         self.location = config.get("location", "")
         self.max_pages = config.get("max_pages_per_keyword", 3)
-        self._browser: Optional[Browser] = None
-        self._playwright = None
+        self.iqr_filter = config.get("iqr_outlier_filter", True)
+        self._client: Optional[httpx.AsyncClient] = None
 
-    async def _get_browser(self) -> Browser:
-        if not self._browser:
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    async def _get_client(self) -> httpx.AsyncClient:
+        if not self._client:
+            self._client = httpx.AsyncClient(
+                headers=HEADERS, follow_redirects=True, timeout=20
             )
-        return self._browser
+        return self._client
 
     async def close(self):
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
+        if self._client:
+            await self._client.aclose()
+            self._client = None
 
-    def _build_search_url(self, keyword: str, category_path: str = "", page: int = 1) -> str:
-        kw_slug = keyword.strip().replace(" ", "-")
-        location_part = f"/{self.location}" if self.location else ""
-        if category_path:
-            base = f"{self.base_url}{category_path}"
-            url = f"{base}q-{kw_slug}/"
-        else:
-            url = f"{self.base_url}/oferte{location_part}/q-{kw_slug}/"
+    def _build_search_url(self, keyword: str, page: int = 1) -> str:
+        kw_slug = _slugify(keyword)
+        loc = f"/{_slugify(self.location)}" if self.location else ""
+        url = f"{self.base_url}{loc}/q-{kw_slug}/"
+        params = ["search[order]=created_at:desc"]
         if page > 1:
-            url += f"?page={page}"
+            params.append(f"page={page}")
+        return url + "?" + "&".join(params)
+
+    def _build_search_url_priced(
+        self, keyword: str, page: int, min_price: Optional[float], max_price: Optional[float]
+    ) -> str:
+        url = self._build_search_url(keyword, page)
+        extra = []
+        if min_price:
+            extra.append(f"search[filter_float_price:from]={int(min_price)}")
+        if max_price:
+            extra.append(f"search[filter_float_price:to]={int(max_price)}")
+        if extra:
+            url += "&" + "&".join(extra)
         return url
 
     async def search(self, keyword: str, category_config: dict) -> list[RawListing]:
-        browser = await self._get_browser()
-        listings: list[RawListing] = []
+        client = await self._get_client()
         price_range = category_config.get("price_range", {})
-        min_price = price_range.get("min_ron", 0)
-        max_price = price_range.get("max_ron", 999999)
-        cat_path = category_config.get("olx_category_path", "")
+        min_price = price_range.get("min_ron")
+        max_price = price_range.get("max_ron")
+        cat_name = category_config.get("name", "")
 
+        listings: list[RawListing] = []
         for page_num in range(1, self.max_pages + 1):
-            url = self._build_search_url(keyword, cat_path, page_num)
-            page_listings = await self._scrape_page(browser, url, keyword, min_price, max_price)
+            url = self._build_search_url_priced(keyword, page_num, min_price, max_price)
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            except Exception as e:
+                print(f"[OLX] Error fetching page {page_num} for '{keyword}': {e}")
+                break
+
+            page_listings = self._parse_page(resp.text, keyword, cat_name)
+            # Hard price-range guard (OLX filter is best-effort)
+            if min_price or max_price:
+                lo = min_price or 0
+                hi = max_price or float("inf")
+                page_listings = [l for l in page_listings if lo <= l.price <= hi]
+
             if not page_listings:
                 break
             listings.extend(page_listings)
             if page_num < self.max_pages:
                 await self._random_delay()
 
-        return listings
-
-    async def _scrape_page(
-        self, browser: Browser, url: str, keyword: str, min_price: float, max_price: float
-    ) -> list[RawListing]:
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="ro-RO",
-            viewport={"width": 1280, "height": 900},
-        )
-        page = await context.new_page()
-        listings: list[RawListing] = []
-
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(2000)
-
-            # Accept cookie consent if present
-            try:
-                await page.click('[id*="onetrust-accept"]', timeout=3000)
-                await page.wait_for_timeout(500)
-            except Exception:
-                pass
-
-            cards = await page.query_selector_all('[data-cy="l-card"]')
-            for card in cards:
-                listing = await self._parse_card(card, keyword)
-                if listing and min_price <= listing.price <= max_price:
-                    listings.append(listing)
-
-        except Exception as e:
-            print(f"[OLX] Error scraping {url}: {e}")
-        finally:
-            await context.close()
+        # IQR outlier removal across all pages for this keyword
+        if self.iqr_filter and len(listings) >= 4:
+            kept, removed = filter_price_outliers(listings, lambda l: l.price)
+            if removed:
+                print(f"[OLX] '{keyword}': dropped {len(removed)} price outlier(s)")
+            listings = kept
 
         return listings
 
-    async def _parse_card(self, card, keyword: str) -> Optional[RawListing]:
+    def _parse_page(self, html: str, keyword: str, category: str) -> list[RawListing]:
+        soup = BeautifulSoup(html, "html.parser")
+        cards = soup.select('[data-cy="l-card"]')
+        results: list[RawListing] = []
+        for card in cards:
+            parsed = self._parse_card(card, keyword, category)
+            if parsed:
+                results.append(parsed)
+        return results
+
+    def _parse_card(self, card, keyword: str, category: str) -> Optional[RawListing]:
         try:
-            # Link and ID
-            link_el = await card.query_selector("a")
-            if not link_el:
+            external_id = card.get("id") or ""
+            link = card.select_one("a[href]")
+            if not link:
                 return None
-            href = await link_el.get_attribute("href") or ""
-            if not href.startswith("http"):
+            href = link.get("href", "")
+            if href.startswith("/"):
                 href = self.base_url + href
-            external_id = href.rstrip("/").split("-")[-1].split(".")[0]
+            if not external_id:
+                m = re.search(r"ID([A-Za-z0-9]+)\.html", href)
+                external_id = m.group(1) if m else href.rsplit("/", 1)[-1]
+            if not external_id:
+                return None
 
-            # Title
-            title_el = await card.query_selector("h6, h4, [data-cy='ad-title']")
-            title = (await title_el.inner_text()).strip() if title_el else ""
+            title_el = card.select_one('[data-cy="ad-card-title"]') or card.select_one("h4, h6")
+            title = title_el.get_text(strip=True) if title_el else ""
             if not title:
                 return None
 
-            # Price
-            price_el = await card.query_selector("[data-testid='ad-price'], p.css-10b0gli, [data-cy='ad-price']")
-            price_text = (await price_el.inner_text()).strip() if price_el else "0"
-            price, currency = _parse_price(price_text)
+            price_el = card.select_one('[data-testid="ad-price"]')
+            if not price_el:
+                return None
+            price, currency = _parse_price(price_el.get_text(strip=True))
             if price <= 0:
                 return None
 
-            # Location and date
             location = ""
             posted_at = None
-            footer_el = await card.query_selector("[data-testid='location-date'], p.css-veheph")
-            if footer_el:
-                footer_text = await footer_el.inner_text()
-                parts = [p.strip() for p in footer_text.split("-")]
-                if len(parts) >= 2:
-                    location = parts[0]
-                    posted_at = _parse_olx_date(parts[-1])
-                elif len(parts) == 1:
-                    location = parts[0]
+            loc_el = card.select_one('[data-testid="location-date"]')
+            if loc_el:
+                loc_text = loc_el.get_text(strip=True)
+                parts = [p.strip() for p in loc_text.split(" - ")]
+                location = parts[0] if parts else loc_text
+                if len(parts) > 1:
+                    posted_at = _parse_ro_date(parts[-1])
 
-            # Image
             images = []
-            img_el = await card.query_selector("img")
-            if img_el:
-                src = await img_el.get_attribute("src") or await img_el.get_attribute("data-src") or ""
-                if src:
+            img = card.select_one("img")
+            if img:
+                src = img.get("src") or img.get("data-src") or ""
+                if src and src.startswith("http"):
                     images.append(src)
 
-            # Condition badge (sometimes present on cards)
             condition = "unknown"
-            badge_el = await card.query_selector("[data-testid='ad-badge-label'], span.css-1dbe8x")
-            if badge_el:
-                badge_text = (await badge_el.inner_text()).strip().lower()
-                for key in CONDITION_MAP:
-                    if key in badge_text:
-                        condition = CONDITION_MAP[key]
-                        break
+            for badge in card.select("span"):
+                bt = badge.get_text(strip=True).lower()
+                if bt in CONDITION_MAP:
+                    condition = CONDITION_MAP[bt]
+                    break
 
             return RawListing(
-                external_id=external_id,
+                external_id=str(external_id),
                 platform="olx",
                 title=title,
                 price=price,
@@ -221,6 +242,7 @@ class OLXScraper(BaseScraper):
                 location=location,
                 condition=condition,
                 images=images,
+                category=category,
                 matched_keyword=keyword,
                 posted_at=posted_at,
             )
@@ -229,50 +251,36 @@ class OLXScraper(BaseScraper):
             return None
 
     async def get_listing_detail(self, url: str) -> dict:
-        browser = await self._get_browser()
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="ro-RO",
-        )
-        page = await context.new_page()
+        client = await self._get_client()
         detail: dict = {}
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(1500)
+            resp = await client.get(url)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-            desc_el = await page.query_selector("[data-cy='ad_description']")
+            desc_el = soup.select_one('[data-cy="ad_description"], [data-testid="ad_description"]')
             if desc_el:
-                detail["description"] = (await desc_el.inner_text()).strip()
+                detail["description"] = desc_el.get_text(strip=True)
 
-            seller_el = await page.query_selector("[data-cy='seller-card'] h4")
+            seller_el = soup.select_one('[data-testid="user-profile-user-name"]')
             if seller_el:
-                detail["seller_name"] = (await seller_el.inner_text()).strip()
+                detail["seller_name"] = seller_el.get_text(strip=True)
 
-            condition_el = await page.query_selector("[data-testid='key-value-Stan']")
-            if condition_el:
-                cond_text = (await condition_el.inner_text()).strip().lower()
+            cond_el = soup.find(string=re.compile(r"Stare", re.I))
+            if cond_el:
+                ct = cond_el.lower()
                 for key in CONDITION_MAP:
-                    if key in cond_text:
+                    if key in ct:
                         detail["condition"] = CONDITION_MAP[key]
                         break
 
-            # All images
-            img_els = await page.query_selector_all("[data-testid='image-gallery-img'] img, .swiper-slide img")
             images = []
-            for img in img_els:
-                src = await img.get_attribute("src") or ""
-                if src and src not in images:
+            for img in soup.select('[data-testid="image-gallery-item"] img, .swiper-slide img'):
+                src = img.get("src") or ""
+                if src.startswith("http") and src not in images:
                     images.append(src)
             if images:
                 detail["images"] = images
-
         except Exception as e:
             print(f"[OLX] Error fetching detail {url}: {e}")
-        finally:
-            await context.close()
-
         return detail

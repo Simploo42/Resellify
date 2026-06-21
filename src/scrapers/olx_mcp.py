@@ -140,14 +140,21 @@ class OLXMCPScraper(BaseScraper):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        self.domain = "ro"  # OLX Romania
+        self.domain = "olx.ro"  # OLX Romania (server enum: olx.pt/pl/bg/ro/ua)
         self.location = config.get("location", "")
         self.max_pages = config.get("max_pages_per_keyword", 3)
+        # Optional path to a locally built server (dist/index.js); else use npx
+        self.mcp_server_path = config.get("mcp_server_path", "")
         self._client: Optional[MCPStdioClient] = None
+
+    def _build_command(self) -> list[str]:
+        if self.mcp_server_path:
+            return ["node", self.mcp_server_path]
+        return ["npx", "--yes", "olx-mcp@latest"]
 
     async def _get_client(self) -> MCPStdioClient:
         if not self._client:
-            self._client = MCPStdioClient(["npx", "--yes", "olx-mcp@latest"])
+            self._client = MCPStdioClient(self._build_command())
             await self._client.start()
         return self._client
 
@@ -214,70 +221,51 @@ class OLXMCPScraper(BaseScraper):
         return listings
 
     def _parse_item(self, item: dict, keyword: str, category: str) -> Optional[RawListing]:
-        # The olx-mcp server may return varying field names; handle both camelCase and snake_case
-        external_id = str(
-            item.get("id") or item.get("listing_id") or item.get("listingId") or ""
-        )
+        # olx-mcp Listing schema:
+        #   { id, title, price?, location?, category?, imageUrl?, url,
+        #     publishedAt?, description?, seller?{name,phone,verified,memberSince} }
+        external_id = str(item.get("id") or "")
         if not external_id:
             return None
 
-        title = item.get("title") or item.get("name") or ""
+        title = item.get("title") or ""
         if not title:
             return None
 
-        url = item.get("url") or item.get("link") or ""
+        url = item.get("url") or ""
         if not url:
             return None
 
-        # Price — may be a number or a string like "1 200 RON"
-        raw_price = item.get("price") or item.get("price_value") or 0
-        if isinstance(raw_price, (int, float)):
-            price = float(raw_price)
-            currency_raw = item.get("currency") or item.get("price_currency") or "RON"
-            currency = currency_raw.upper()
+        # Price comes back as a string like "1 200 lei" / "1.200 €" (may be absent)
+        raw_price = item.get("price")
+        if raw_price is None:
+            price, currency = 0.0, "RON"
+        elif isinstance(raw_price, (int, float)):
+            price, currency = float(raw_price), "RON"
         else:
             price, currency = _parse_price(str(raw_price))
 
         if price <= 0:
             return None
 
-        location = item.get("location") or item.get("city") or item.get("region") or ""
-        if isinstance(location, dict):
-            location = location.get("name") or location.get("city") or ""
+        location = item.get("location") or ""
 
-        condition_raw = (
-            item.get("condition")
-            or item.get("state")
-            or item.get("params", {}).get("condition", "")
-            if isinstance(item.get("params"), dict)
-            else item.get("condition", "")
-        )
-        condition = str(condition_raw).lower() if condition_raw else "unknown"
+        # Search results carry no condition field; detail enrichment may add it later
+        condition = str(item.get("condition") or "unknown").lower()
 
-        images_raw = item.get("photos") or item.get("images") or item.get("image") or []
+        # Single imageUrl string on search results; detail returns an images array
         images: list[str] = []
-        if isinstance(images_raw, str):
-            images = [images_raw]
-        elif isinstance(images_raw, list):
-            for img in images_raw[:5]:
-                if isinstance(img, str):
-                    images.append(img)
-                elif isinstance(img, dict):
-                    src = img.get("url") or img.get("src") or img.get("link") or ""
-                    if src:
-                        images.append(src)
+        if item.get("imageUrl"):
+            images.append(item["imageUrl"])
+        for img in (item.get("images") or []):
+            if isinstance(img, str) and img not in images:
+                images.append(img)
 
-        seller = item.get("seller") or item.get("user") or {}
-        seller_name = ""
-        seller_url = ""
-        if isinstance(seller, dict):
-            seller_name = seller.get("name") or seller.get("username") or ""
-            seller_url = seller.get("url") or seller.get("profile_url") or ""
-        elif isinstance(seller, str):
-            seller_name = seller
+        seller = item.get("seller") or {}
+        seller_name = seller.get("name", "") if isinstance(seller, dict) else str(seller)
 
         posted_at: Optional[datetime] = None
-        date_raw = item.get("created_at") or item.get("date") or item.get("postedAt") or ""
+        date_raw = item.get("publishedAt")
         if date_raw:
             try:
                 posted_at = datetime.fromisoformat(str(date_raw).replace("Z", "+00:00"))
@@ -295,7 +283,6 @@ class OLXMCPScraper(BaseScraper):
             condition=condition,
             images=images,
             seller_name=seller_name,
-            seller_url=seller_url,
             category=category,
             matched_keyword=keyword,
             posted_at=posted_at,
@@ -303,15 +290,15 @@ class OLXMCPScraper(BaseScraper):
 
     async def get_listing_detail(self, url: str) -> dict:
         client = await self._get_client()
-        # Extract listing ID from URL
-        id_match = re.search(r"-(\d+)\.html", url)
+        # OLX URLs encode the id as ID<alphanumeric>.html
+        id_match = re.search(r"ID([A-Za-z0-9]+)\.html", url)
         if not id_match:
             return {}
         listing_id = id_match.group(1)
         try:
             result = await client.call_tool("getListingDetails", {
                 "domain": self.domain,
-                "id": listing_id,
+                "listingId": listing_id,
                 "includeImages": True,
                 "includeSellerInfo": True,
             })

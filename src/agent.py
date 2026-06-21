@@ -10,11 +10,12 @@ import yaml
 from sqlalchemy import select, update
 
 from .db.models import (
-    AsyncSessionLocal, Listing, PriceEstimate, DealScore, ScanLog, init_db
+    AsyncSessionLocal, Listing, PriceEstimate, DealScore, ScanLog,
+    PriceChange, init_db
 )
 from .scrapers.base import RawListing
 from .scrapers.olx_mcp import OLXMCPScraper
-from .scrapers.olx import OLXScraper                    # Playwright fallback
+from .scrapers.olx import OLXScraper                    # HTTP (httpx+BS4) fallback
 from .scrapers.facebook_mcp import FacebookMCPScraper   # MCP primary
 from .scrapers.facebook import FacebookMarketplaceScraper # Playwright fallback
 from .scrapers.ebay_scraper import EbayScraper
@@ -51,6 +52,10 @@ async def process_listing(
     price_config: dict,
 ) -> bool:
     """Price and score a single listing. Returns True if it's a good deal."""
+    price_ron = convert_price_to_ron(raw.price, raw.currency, price_config)
+    min_profit = scoring_cfg.get("min_profit_percent", 15)
+    min_profit_ron = scoring_cfg.get("min_profit_ron", 50)
+
     async with AsyncSessionLocal() as session:
         # Check if we've already processed this listing recently
         result = await session.execute(
@@ -58,18 +63,62 @@ async def process_listing(
         )
         existing = result.scalar_one_or_none()
         if existing:
-            await session.execute(
-                update(Listing).where(Listing.id == raw.listing_id).values(
-                    last_seen_at=datetime.utcnow(), is_active=True
-                )
-            )
-            await session.commit()
-            return False  # already processed
+            price_dropped = False
+            old_price = existing.price_ron or price_ron
+            if abs(price_ron - old_price) >= 0.01:
+                # Price changed since we last saw this listing — record it.
+                delta = price_ron - old_price
+                delta_pct = (delta / old_price * 100) if old_price else 0.0
+                session.add(PriceChange(
+                    listing_id=raw.listing_id,
+                    old_price_ron=old_price,
+                    new_price_ron=price_ron,
+                    delta_ron=round(delta, 2),
+                    delta_pct=round(delta_pct, 1),
+                ))
+                first_price = existing.first_price_ron or old_price
+                total_drop = first_price - price_ron
+                existing.price = raw.price
+                existing.currency = raw.currency
+                existing.price_ron = price_ron
+                existing.price_drop_ron = round(total_drop, 2)
+                existing.price_drop_pct = round(total_drop / first_price * 100, 1) if first_price else 0.0
+                existing.price_changes = (existing.price_changes or 0) + 1
+                price_dropped = delta < 0
+                print(f"[Agent] Price change on '{existing.title[:40]}': "
+                      f"{old_price:.0f} -> {price_ron:.0f} RON ({delta_pct:+.1f}%)")
 
-        # Convert price to RON
-        price_ron = convert_price_to_ron(raw.price, raw.currency, price_config)
-        min_profit = scoring_cfg.get("min_profit_percent", 15)
-        min_profit_ron = scoring_cfg.get("min_profit_ron", 50)
+            existing.last_seen_at = datetime.utcnow()
+            existing.is_active = True
+
+            if not price_dropped:
+                await session.commit()
+                return False
+            # Price dropped — re-score against the existing estimate (cheap path)
+            score_result = await session.execute(
+                select(DealScore).where(DealScore.listing_id == raw.listing_id)
+            )
+            ds = score_result.scalar_one_or_none()
+            if ds and ds.estimated_value_ron > 0:
+                rescored = scorer.score(
+                    asking_price_ron=price_ron,
+                    estimated_value_ron=ds.estimated_value_ron,
+                    demand_score=ds.demand_score,
+                    confidence=(ds.confidence_score / 100.0),
+                    condition=existing.condition,
+                    platform=existing.platform,
+                )
+                ds.total_score = rescored.total_score
+                ds.profit_score = rescored.profit_score
+                ds.asking_price_ron = price_ron
+                ds.estimated_profit_ron = rescored.estimated_profit_ron
+                ds.profit_percent = rescored.profit_percent
+                ds.notes = rescored.notes + [f"Price dropped to {price_ron:.0f} RON"]
+                ds.updated_at = datetime.utcnow()
+                await session.commit()
+                return rescored.is_good_deal and rescored.estimated_profit_ron >= min_profit_ron
+            await session.commit()
+            return False
 
         # Save listing
         listing = Listing(
@@ -81,6 +130,7 @@ async def process_listing(
             price=raw.price,
             currency=raw.currency,
             price_ron=price_ron,
+            first_price_ron=price_ron,
             condition=raw.condition,
             location=raw.location,
             url=raw.url,
@@ -241,14 +291,14 @@ async def run_scan(config: dict):
     all_listings: list[RawListing] = []
 
     if markets.get("olx", {}).get("enabled", True):
-        # Try MCP-based scraper first; fall back to Playwright if npx unavailable
+        # Try MCP-based scraper first; fall back to HTTP scraper if npx unavailable
         olx_listings: list[RawListing] = []
         try:
             olx_mcp = OLXMCPScraper(markets["olx"])
             olx_listings = await olx_mcp.scrape_all_keywords(active_categories)
             await olx_mcp.close()
         except Exception as e:
-            print(f"[Agent] OLX-MCP unavailable ({e}), falling back to Playwright scraper")
+            print(f"[Agent] OLX-MCP unavailable ({e}), falling back to HTTP scraper")
             olx = OLXScraper(markets["olx"])
             try:
                 olx_listings = await olx.scrape_all_keywords(active_categories)

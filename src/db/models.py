@@ -38,11 +38,33 @@ class Listing(Base):
     scraped_at = Column(DateTime, default=datetime.utcnow)
     last_seen_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
+    # Price-change tracking
+    first_price_ron = Column(Float, nullable=True)   # price when first seen
+    price_drop_ron = Column(Float, default=0.0)      # total drop since first seen
+    price_drop_pct = Column(Float, default=0.0)      # % drop since first seen
+    price_changes = Column(Integer, default=0)       # number of observed changes
 
     __table_args__ = (
         Index("ix_listings_platform", "platform"),
         Index("ix_listings_scraped_at", "scraped_at"),
         Index("ix_listings_is_active", "is_active"),
+    )
+
+
+class PriceChange(Base):
+    __tablename__ = "price_changes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    listing_id = Column(String, nullable=False)
+    old_price_ron = Column(Float, nullable=False)
+    new_price_ron = Column(Float, nullable=False)
+    delta_ron = Column(Float, nullable=False)        # new - old (negative = drop)
+    delta_pct = Column(Float, nullable=False)
+    changed_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_price_changes_listing_id", "listing_id"),
+        Index("ix_price_changes_changed_at", "changed_at"),
     )
 
 
