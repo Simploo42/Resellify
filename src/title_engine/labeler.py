@@ -115,11 +115,21 @@ class HaikuLabeler:
     def __init__(self, model: str = LABELER_MODEL, batch_size: int = BATCH_SIZE):
         self.batch_size = batch_size
         self._version_tag = datetime.utcnow().strftime("%Y-%m")
-        # Resolve backend — priority: Gemini > OpenRouter > Anthropic
+        # Resolve backend — priority: Custom > Gemini > OpenRouter > Anthropic
+        custom_url = os.environ.get("CUSTOM_API_URL", "")
         gemini_key = os.environ.get("GEMINI_API_KEY", "")
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if gemini_key:
+        if custom_url:
+            from openai import AsyncOpenAI
+            self._backend = "custom"
+            self._model = os.environ.get("CUSTOM_MODEL", "")
+            self._openai_client = AsyncOpenAI(
+                base_url=custom_url,
+                api_key=os.environ.get("CUSTOM_API_KEY", "none"),
+            )
+            self._anthropic_client = None
+        elif gemini_key:
             from openai import AsyncOpenAI
             self._backend = "gemini"
             self._model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
@@ -181,7 +191,7 @@ class HaikuLabeler:
         return records
 
     async def _call_api(self, user_msg: str) -> str:
-        if self._backend in ("openrouter", "gemini"):
+        if self._backend in ("openrouter", "gemini", "custom"):
             for attempt in range(6):
                 try:
                     resp = await self._openai_client.chat.completions.create(
