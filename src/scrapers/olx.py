@@ -196,7 +196,13 @@ class OLXScraper(BaseScraper):
             if not external_id:
                 return None
 
-            title_el = card.select_one('[data-cy="ad-card-title"]') or card.select_one("h4, h6")
+            # The title container also wraps the price element, so target the
+            # inner heading to avoid gluing the price onto the title.
+            title_el = (
+                card.select_one('[data-cy="ad-card-title"] h4')
+                or card.select_one('[data-cy="ad-card-title"] h6')
+                or card.select_one("h4, h6")
+            )
             title = title_el.get_text(strip=True) if title_el else ""
             if not title:
                 return None
