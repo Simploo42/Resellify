@@ -1,13 +1,18 @@
 import asyncio
+import json
 import os
+import tempfile
+import threading
 import yaml
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, Depends, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy import select, desc, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +27,84 @@ app = FastAPI(title="Resellify", description="Market resell opportunity finder")
 _agent_task: Optional[asyncio.Task] = None
 CONFIG_PATH = "config/settings.yaml"
 
+# ── NER Spot-Check state ───────────────────────────────────────────────────
+
+_QUEUE_PATH = Path("data/title_engine/spot_check_queue.jsonl")
+_TRAIN_PATH = Path("data/title_engine/train_v0.jsonl")
+_REJECTED_PATH = Path("data/title_engine/rejected_manual.jsonl")
+_REVIEWED_IDS_PATH = Path("data/title_engine/.reviewed_ids")
+
+# In-memory state (loaded lazily)
+_ner_queue: Optional[list] = None          # list of dicts (unreviewed records)
+_ner_reviewed_ids: Optional[set] = None    # IDs already reviewed in this or prior sessions
+
+# Retrain state
+_retrain_running = False
+_retrain_log_path: Optional[str] = None
+
+
+def _load_ner_state():
+    """Load queue and reviewed IDs into memory if not already loaded."""
+    global _ner_queue, _ner_reviewed_ids
+
+    if _ner_reviewed_ids is None:
+        if _REVIEWED_IDS_PATH.exists():
+            _ner_reviewed_ids = set(_REVIEWED_IDS_PATH.read_text().splitlines())
+        else:
+            _ner_reviewed_ids = set()
+
+    if _ner_queue is None:
+        if _QUEUE_PATH.exists():
+            all_records = [
+                json.loads(line)
+                for line in _QUEUE_PATH.read_text().splitlines()
+                if line.strip()
+            ]
+            # Filter out already-reviewed records
+            _ner_queue = [r for r in all_records if r["id"] not in _ner_reviewed_ids]
+        else:
+            _ner_queue = []
+
+
+def _persist_reviewed_id(record_id: str):
+    """Append an ID to the reviewed_ids file and update in-memory set."""
+    global _ner_reviewed_ids
+    _ner_reviewed_ids.add(record_id)
+    _REVIEWED_IDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_REVIEWED_IDS_PATH, "a") as f:
+        f.write(record_id + "\n")
+
+
+def _rewrite_queue():
+    """Rewrite the queue file from in-memory state."""
+    _QUEUE_PATH.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in _ner_queue) + ("\n" if _ner_queue else "")
+    )
+
+
+def _total_original_size() -> int:
+    """Total number of records originally in the queue (reviewed + remaining)."""
+    reviewed = len(_ner_reviewed_ids) if _ner_reviewed_ids is not None else 0
+    remaining = len(_ner_queue) if _ner_queue is not None else 0
+    return reviewed + remaining
+
+
+def _next_unreviewed() -> Optional[dict]:
+    """Return the first record in the queue."""
+    _load_ner_state()
+    return _ner_queue[0] if _ner_queue else None
+
+
+class AcceptBody(BaseModel):
+    id: str
+    tags: list[str]
+
+
+class RejectBody(BaseModel):
+    id: str
+
+
+# ── Startup ────────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup():
@@ -288,3 +371,141 @@ def _grade(score: float) -> str:
     if score >= 45:
         return "C"
     return "D"
+
+
+# ── NER Spot-Check routes ──────────────────────────────────────────────────
+
+@app.get("/spot-check", response_class=HTMLResponse)
+async def spot_check_page(request: Request, skip: str = ""):
+    global _ner_queue
+    _load_ner_state()
+
+    # Skip: rotate the skipped record to the end of the queue (no reviewed count increment)
+    if skip and _ner_queue and _ner_queue[0]["id"] == skip:
+        _ner_queue.append(_ner_queue.pop(0))
+
+    record = _next_unreviewed()
+    total = _total_original_size()
+    reviewed = len(_ner_reviewed_ids)
+    remaining = len(_ner_queue)
+    progress = {
+        "reviewed": reviewed,
+        "total": total,
+        "remaining": remaining,
+    }
+    return templates.TemplateResponse("spot_check.html", {
+        "request": request,
+        "record": record,
+        "progress": progress,
+    })
+
+
+@app.post("/spot-check/accept")
+async def spot_check_accept(body: AcceptBody):
+    global _ner_queue
+    _load_ner_state()
+
+    # Find and remove from queue
+    record = next((r for r in _ner_queue if r["id"] == body.id), None)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found in queue")
+
+    # Apply updated tags
+    record = dict(record)
+    record["tags"] = body.tags
+    record["needs_review"] = False
+
+    # Append to train file
+    _TRAIN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_TRAIN_PATH, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    # Remove from in-memory queue and persist
+    _ner_queue = [r for r in _ner_queue if r["id"] != body.id]
+    _persist_reviewed_id(body.id)
+    _rewrite_queue()
+
+    next_record = _next_unreviewed()
+    return JSONResponse({"ok": True, "next_id": next_record["id"] if next_record else None})
+
+
+@app.post("/spot-check/reject")
+async def spot_check_reject(body: RejectBody):
+    global _ner_queue
+    _load_ner_state()
+
+    record = next((r for r in _ner_queue if r["id"] == body.id), None)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Record not found in queue")
+
+    # Append to rejected file
+    _REJECTED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_REJECTED_PATH, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    # Remove from in-memory queue and persist
+    _ner_queue = [r for r in _ner_queue if r["id"] != body.id]
+    _persist_reviewed_id(body.id)
+    _rewrite_queue()
+
+    next_record = _next_unreviewed()
+    return JSONResponse({"ok": True, "next_id": next_record["id"] if next_record else None})
+
+
+# ── NER Retrain routes ─────────────────────────────────────────────────────
+
+def _run_retrain_thread(log_path: str):
+    global _retrain_running
+    try:
+        import sys
+        from src.title_engine.trainer import train
+
+        with open(log_path, "w") as log_f:
+            # Redirect stdout/stderr
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout = log_f
+            sys.stderr = log_f
+            try:
+                train(
+                    Path("data/title_engine/train_v0.jsonl"),
+                    Path("models/title_ner"),
+                )
+            except Exception as exc:
+                log_f.write(f"\n[Retrain ERROR] {exc}\n")
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+    finally:
+        _retrain_running = False
+
+
+@app.post("/api/ner/retrain")
+async def api_ner_retrain():
+    global _retrain_running, _retrain_log_path
+
+    if _retrain_running:
+        return JSONResponse({"ok": False, "status": "already_running"})
+
+    # Create a persistent temp file for logging
+    fd, log_path = tempfile.mkstemp(prefix="ner_retrain_", suffix=".log")
+    os.close(fd)
+    _retrain_log_path = log_path
+    _retrain_running = True
+
+    t = threading.Thread(target=_run_retrain_thread, args=(log_path,), daemon=True)
+    t.start()
+
+    return JSONResponse({"ok": True, "status": "started"})
+
+
+@app.get("/api/ner/retrain/status")
+async def api_ner_retrain_status():
+    global _retrain_running, _retrain_log_path
+
+    log_lines = ""
+    if _retrain_log_path and os.path.exists(_retrain_log_path):
+        with open(_retrain_log_path) as f:
+            lines = f.read().splitlines()
+        log_lines = "\n".join(lines[-20:])
+
+    return JSONResponse({"running": _retrain_running, "log": log_lines})

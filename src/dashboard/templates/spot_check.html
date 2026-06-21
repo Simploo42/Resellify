@@ -1,0 +1,346 @@
+{% extends "base.html" %}
+{% block title %}Spot Check — Resellify{% endblock %}
+{% block content %}
+
+{% if record %}
+{% set initial_data = {
+  "recordId": record.id,
+  "tokens": record.tokens,
+  "tags": record.tags
+} %}
+{% else %}
+{% set initial_data = {"recordId": null, "tokens": [], "tags": []} %}
+{% endif %}
+
+<div class="max-w-4xl mx-auto"
+  x-data="spotCheck({{ initial_data | tojson | e }})">
+
+  <!-- Progress bar -->
+  <div class="mb-6">
+    <div class="flex items-center justify-between mb-2">
+      <h1 class="text-lg font-bold text-white">NER Spot Check</h1>
+      <span class="text-sm text-gray-400">
+        <span class="text-white font-medium">{{ progress.reviewed }}</span> / {{ progress.total }} reviewed
+        &nbsp;&middot;&nbsp;
+        <span class="text-yellow-400 font-medium">{{ progress.remaining }}</span> remaining
+      </span>
+    </div>
+    <div class="w-full bg-gray-800 rounded-full h-2">
+      {% set pct = ((progress.reviewed / progress.total * 100) if progress.total > 0 else 0) | round(1) %}
+      <div class="bg-indigo-500 h-2 rounded-full transition-all duration-500" style="width: {{ pct }}%"></div>
+    </div>
+    <div class="text-xs text-gray-500 mt-1">{{ pct }}% complete</div>
+  </div>
+
+  {% if record %}
+  <!-- Record card -->
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-6 mb-4">
+
+    <!-- Raw title + confidence -->
+    <div class="flex items-start justify-between gap-4 mb-5">
+      <div>
+        <div class="text-xs text-gray-500 uppercase tracking-wide mb-1">Raw title</div>
+        <div class="text-xl font-semibold text-white leading-snug">{{ record.raw }}</div>
+        <div class="text-xs text-gray-500 mt-1">ID: {{ record.id }}</div>
+      </div>
+      <!-- Confidence badge -->
+      {% set conf = record.confidence %}
+      <div class="flex-shrink-0">
+        <span class="text-xs font-bold px-3 py-1.5 rounded-full
+          {% if conf >= 0.85 %}bg-emerald-900/50 text-emerald-300 border border-emerald-700
+          {% elif conf >= 0.75 %}bg-yellow-900/50 text-yellow-300 border border-yellow-700
+          {% else %}bg-red-900/50 text-red-300 border border-red-700{% endif %}">
+          conf {{ (conf * 100) | round(0) | int }}%
+        </span>
+      </div>
+    </div>
+
+    <!-- Token tag editor -->
+    <div class="mb-5">
+      <div class="text-xs text-gray-500 uppercase tracking-wide mb-3">Tokens — click to cycle label</div>
+      <div class="flex flex-wrap gap-2">
+        <template x-for="(tok, idx) in tokens" :key="idx">
+          <div class="flex flex-col items-center gap-1 cursor-pointer group" @click="cycleLabel(idx)">
+            <!-- Token pill -->
+            <div class="px-3 py-1.5 rounded-lg text-sm font-mono font-medium border transition-all select-none"
+              :class="pillClass(idx)"
+              x-text="tok">
+            </div>
+            <!-- Label below -->
+            <div class="text-xs font-mono leading-none transition-all"
+              :class="labelClass(idx)"
+              x-text="tags[idx]">
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Uncertain tokens notice -->
+    {% if record.uncertain_idx %}
+    <div class="text-xs text-yellow-500/80 mb-4">
+      Uncertain positions: {{ record.uncertain_idx | join(', ') }}
+      (tokens:
+      {% for i in record.uncertain_idx %}
+        <span class="font-mono text-yellow-400">{{ record.tokens[i] if i < record.tokens | length else '?' }}</span>{% if not loop.last %}, {% endif %}
+      {% endfor %})
+    </div>
+    {% endif %}
+
+    <!-- Action buttons -->
+    <div class="flex items-center gap-3 pt-2">
+      <button
+        @click="accept()"
+        :disabled="submitting"
+        class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors">
+        Accept
+      </button>
+      <button
+        @click="reject()"
+        :disabled="submitting"
+        class="px-5 py-2.5 bg-red-700 hover:bg-red-600 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors">
+        Reject
+      </button>
+      <button
+        @click="skip()"
+        :disabled="submitting"
+        class="px-5 py-2.5 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded-lg text-sm font-medium transition-colors">
+        Skip
+      </button>
+      <span x-show="submitting" class="text-xs text-gray-500 ml-1">Saving...</span>
+      <span x-show="errorMsg" x-text="errorMsg" class="text-xs text-red-400 ml-1"></span>
+    </div>
+  </div>
+
+  <!-- Label legend -->
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
+    <div class="text-xs text-gray-500 uppercase tracking-wide mb-2">Label legend</div>
+    <div class="flex flex-wrap gap-1.5">
+      <template x-for="lbl in labelOptions" :key="lbl">
+        <span class="text-xs px-2 py-0.5 rounded font-mono"
+          :class="legendClass(lbl)"
+          x-text="lbl">
+        </span>
+      </template>
+    </div>
+  </div>
+
+  {% else %}
+  <!-- Queue exhausted -->
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-10 text-center">
+    <div class="text-4xl mb-3">All done!</div>
+    <div class="text-gray-400 text-sm">All records in the spot-check queue have been reviewed.</div>
+    <div class="mt-4">
+      <a href="/" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-medium transition-colors">
+        Back to deals
+      </a>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Retrain section -->
+  <div class="bg-gray-900 border border-gray-800 rounded-xl p-5 mt-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-medium text-gray-300">Retrain NER Model</h2>
+      <button
+        @click="startRetrain()"
+        :disabled="retrainRunning"
+        class="px-4 py-2 bg-blue-700 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-xs font-medium transition-colors">
+        <span x-text="retrainRunning ? 'Training...' : 'Retrain now'"></span>
+      </button>
+    </div>
+    <div x-show="retrainLog || retrainRunning" class="mt-2">
+      <div class="text-xs text-gray-500 mb-1">Training log (last 20 lines)</div>
+      <pre class="bg-gray-950 border border-gray-700 rounded-lg p-3 text-xs text-gray-300 font-mono overflow-x-auto whitespace-pre-wrap max-h-48 overflow-y-auto"
+        x-text="retrainLog || '(waiting for output...)'"></pre>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function spotCheck(initialData) {
+  return {
+    recordId: initialData.recordId || null,
+    tokens: initialData.tokens || [],
+    tags: initialData.tags ? [...initialData.tags] : [],
+    submitting: false,
+    errorMsg: '',
+
+    // Retrain
+    retrainRunning: false,
+    retrainLog: '',
+    retrainPollTimer: null,
+
+    // All label base names (O first, then entity types)
+    labelBases: ['O','BRAND','MODEL','VARIANT','DIMENSION','COLOR','MATERIAL','CONDITION','IDENTIFIER','ACCESSORY','QUANTITY'],
+    labelOptions: ['O','B-BRAND','I-BRAND','B-MODEL','I-MODEL','B-VARIANT','I-VARIANT','B-DIMENSION','I-DIMENSION','B-COLOR','I-COLOR','B-MATERIAL','I-MATERIAL','B-CONDITION','I-CONDITION','B-IDENTIFIER','I-IDENTIFIER','B-ACCESSORY','I-ACCESSORY','B-QUANTITY','I-QUANTITY'],
+
+    // Cycle a token through base labels
+    // After changing, B-/I- is auto-derived from the sequence
+    cycleLabel(idx) {
+      const current = this.tags[idx];
+      const base = current === 'O' ? 'O' : current.slice(2);
+      const bases = this.labelBases;
+      const nextBase = bases[(bases.indexOf(base) + 1) % bases.length];
+
+      if (nextBase === 'O') {
+        this.tags[idx] = 'O';
+      } else {
+        const prev = idx > 0 ? this.tags[idx - 1] : null;
+        const prevBase = (prev && prev !== 'O') ? prev.slice(2) : null;
+        this.tags[idx] = (prevBase === nextBase ? 'I-' : 'B-') + nextBase;
+      }
+
+      // Cascade: fix B-/I- for subsequent tokens
+      this._cascadeFrom(idx + 1);
+    },
+
+    _cascadeFrom(startIdx) {
+      for (let i = startIdx; i < this.tags.length; i++) {
+        const cur = this.tags[i];
+        if (cur === 'O') continue;
+        const curBase = cur.slice(2);
+        const prev = i > 0 ? this.tags[i - 1] : null;
+        const prevBase = (prev && prev !== 'O') ? prev.slice(2) : null;
+        const expected = (prevBase === curBase ? 'I-' : 'B-') + curBase;
+        if (this.tags[i] !== expected) {
+          this.tags[i] = expected;
+        }
+      }
+    },
+
+    pillClass(idx) {
+      const tag = this.tags[idx];
+      if (tag === 'O') return 'bg-gray-800 border-gray-700 text-gray-300 group-hover:border-gray-500';
+      const base = tag.slice(2);
+      const map = {
+        BRAND:      'bg-purple-900/60 border-purple-600 text-purple-200',
+        MODEL:      'bg-blue-900/60 border-blue-600 text-blue-200',
+        VARIANT:    'bg-cyan-900/60 border-cyan-600 text-cyan-200',
+        DIMENSION:  'bg-green-900/60 border-green-600 text-green-200',
+        COLOR:      'bg-pink-900/60 border-pink-600 text-pink-200',
+        MATERIAL:   'bg-orange-900/60 border-orange-600 text-orange-200',
+        CONDITION:  'bg-yellow-900/60 border-yellow-600 text-yellow-200',
+        IDENTIFIER: 'bg-red-900/60 border-red-600 text-red-200',
+        ACCESSORY:  'bg-indigo-900/60 border-indigo-600 text-indigo-200',
+        QUANTITY:   'bg-teal-900/60 border-teal-600 text-teal-200',
+      };
+      return (map[base] || 'bg-gray-700 border-gray-600 text-gray-200') + ' group-hover:brightness-125';
+    },
+
+    labelClass(idx) {
+      const tag = this.tags[idx];
+      if (tag === 'O') return 'text-gray-600';
+      const base = tag.slice(2);
+      const map = {
+        BRAND: 'text-purple-400', MODEL: 'text-blue-400', VARIANT: 'text-cyan-400',
+        DIMENSION: 'text-green-400', COLOR: 'text-pink-400', MATERIAL: 'text-orange-400',
+        CONDITION: 'text-yellow-400', IDENTIFIER: 'text-red-400', ACCESSORY: 'text-indigo-400',
+        QUANTITY: 'text-teal-400',
+      };
+      return map[base] || 'text-gray-400';
+    },
+
+    legendClass(lbl) {
+      if (lbl === 'O') return 'bg-gray-800 text-gray-400';
+      const base = lbl.slice(2);
+      const map = {
+        BRAND: 'bg-purple-900/40 text-purple-300', MODEL: 'bg-blue-900/40 text-blue-300',
+        VARIANT: 'bg-cyan-900/40 text-cyan-300', DIMENSION: 'bg-green-900/40 text-green-300',
+        COLOR: 'bg-pink-900/40 text-pink-300', MATERIAL: 'bg-orange-900/40 text-orange-300',
+        CONDITION: 'bg-yellow-900/40 text-yellow-300', IDENTIFIER: 'bg-red-900/40 text-red-300',
+        ACCESSORY: 'bg-indigo-900/40 text-indigo-300', QUANTITY: 'bg-teal-900/40 text-teal-300',
+      };
+      return map[base] || 'bg-gray-700 text-gray-300';
+    },
+
+    async accept() {
+      if (!this.recordId) return;
+      this.submitting = true;
+      this.errorMsg = '';
+      try {
+        const res = await fetch('/spot-check/accept', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.recordId, tags: this.tags }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          window.location.href = '/spot-check';
+        } else {
+          this.errorMsg = 'Error accepting record';
+        }
+      } catch(e) {
+        this.errorMsg = e.message;
+      } finally {
+        this.submitting = false;
+      }
+    },
+
+    async reject() {
+      if (!this.recordId) return;
+      this.submitting = true;
+      this.errorMsg = '';
+      try {
+        const res = await fetch('/spot-check/reject', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: this.recordId }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          window.location.href = '/spot-check';
+        } else {
+          this.errorMsg = 'Error rejecting record';
+        }
+      } catch(e) {
+        this.errorMsg = e.message;
+      } finally {
+        this.submitting = false;
+      }
+    },
+
+    skip() {
+      if (!this.recordId) return;
+      window.location.href = '/spot-check?skip=' + encodeURIComponent(this.recordId);
+    },
+
+    async startRetrain() {
+      this.retrainRunning = true;
+      this.retrainLog = '';
+      try {
+        const res = await fetch('/api/ner/retrain', { method: 'POST' });
+        const data = await res.json();
+        if (!data.ok && data.status === 'already_running') {
+          // Already running — just start polling
+        }
+        this._pollRetrain();
+      } catch(e) {
+        this.retrainRunning = false;
+        this.retrainLog = 'Error starting retrain: ' + e.message;
+      }
+    },
+
+    _pollRetrain() {
+      if (this.retrainPollTimer) clearInterval(this.retrainPollTimer);
+      this.retrainPollTimer = setInterval(async () => {
+        try {
+          const res = await fetch('/api/ner/retrain/status');
+          const data = await res.json();
+          this.retrainRunning = data.running;
+          this.retrainLog = data.log || '';
+          if (!data.running) {
+            clearInterval(this.retrainPollTimer);
+            this.retrainPollTimer = null;
+          }
+        } catch(e) {
+          // keep polling silently
+        }
+      }, 2000);
+    }
+  }
+}
+</script>
+
+{% endblock %}
