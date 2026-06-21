@@ -40,13 +40,23 @@ class LLMPriceEstimator:
         condition: str = "unknown",
         platform: str = "",
         category: str = "",
+        ner_entities: dict | None = None,
     ) -> LLMPriceEstimate:
         client = self._get_client()
+
+        # Build a structured item description from NER entities when available
+        if ner_entities:
+            entity_lines = "\n".join(
+                f"  {k.upper()}: {v}" for k, v in ner_entities.items() if v
+            )
+            item_block = f"Raw title: {title}\nExtracted entities:\n{entity_lines}"
+        else:
+            item_block = f"Item: {title}"
 
         prompt = f"""You are a professional reseller and market pricing expert.
 Estimate the current fair market resale value in USD for the following second-hand item.
 
-Item: {title}
+{item_block}
 Category: {category or "General"}
 Condition: {condition}
 Platform: {platform}

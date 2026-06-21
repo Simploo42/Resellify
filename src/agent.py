@@ -20,6 +20,7 @@ from .scrapers.facebook_mcp import FacebookMCPScraper   # MCP primary
 from .scrapers.facebook import FacebookMarketplaceScraper # Playwright fallback
 from .scrapers.ebay_scraper import EbayScraper
 from .pricing.ebay_sold import EbaySoldPricer, EbayMarketData
+from .pricing.emag import EmagPricer, EmagMarketData
 from .pricing.llm_estimator import LLMPriceEstimator
 from .scoring.deal_scorer import DealScorer
 from .title_engine.tokenizer import tokenize
@@ -67,12 +68,14 @@ def convert_price_to_ron(price: float, currency: str, config: dict) -> float:
 async def process_listing(
     raw: RawListing,
     ebay_pricer: EbaySoldPricer,
+    emag_pricer: EmagPricer,
     llm_estimator: Optional[LLMPriceEstimator],
     scorer: DealScorer,
     pricing_cfg: dict,
     scoring_cfg: dict,
     price_config: dict,
     ebay_cache: Optional[dict[str, EbayMarketData]] = None,
+    emag_cache: Optional[dict[str, EmagMarketData]] = None,
 ) -> bool:
     """Price and score a single listing. Returns True if it's a good deal."""
     price_ron = convert_price_to_ron(raw.price, raw.currency, price_config)
@@ -194,13 +197,40 @@ async def process_listing(
         if search_query != raw.title[:80]:
             print(f"[Agent] Canonical query: {search_query!r}  (was: {raw.title[:60]!r})")
 
+        # ── eMAG pricing (primary RON source) ───────────────────────────────
+        if emag_cache is not None and search_query in emag_cache:
+            emag_data = emag_cache[search_query]
+        else:
+            emag_data = await emag_pricer.get_market_data(search_query)
+            if emag_cache is not None:
+                emag_cache[search_query] = emag_data
+
+        emag_value_ron = 0.0
+        emag_confidence = 0.0
+        if emag_data.listing_count > 0:
+            emag_value_ron = emag_data.median_price_ron
+            emag_confidence = emag_data.confidence
+            session.add(PriceEstimate(
+                listing_id=raw.listing_id,
+                method="emag",
+                estimated_value_ron=emag_value_ron,
+                confidence=emag_confidence,
+                sold_count=emag_data.listing_count,
+                avg_price_ron=emag_data.avg_price_ron,
+                min_price_ron=emag_data.min_price_ron,
+                max_price_ron=emag_data.max_price_ron,
+                raw_data={"query": search_query, "listing_count": emag_data.listing_count},
+            ))
+            print(f"[Agent] eMAG: {emag_data.listing_count} listings, "
+                  f"median {emag_value_ron:.0f} RON for {search_query!r}")
+
+        # ── eBay pricing (demand signal + global validation) ─────────────────
         if ebay_cache is not None and search_query in ebay_cache:
             ebay_data = ebay_cache[search_query]
         else:
             ebay_data = await ebay_pricer.get_market_data(search_query)
             if ebay_cache is not None:
                 ebay_cache[search_query] = ebay_data
-        usd_to_ron = price_config.get("usd_to_ron_rate", 4.55)
 
         ebay_value_ron = 0.0
         ebay_confidence = 0.0
@@ -215,7 +245,7 @@ async def process_listing(
             sold_count = ebay_data.sold_count
             recent_30d = ebay_data.recent_sold_30d
 
-            pe = PriceEstimate(
+            session.add(PriceEstimate(
                 listing_id=raw.listing_id,
                 method="ebay_sold",
                 estimated_value_ron=ebay_value_ron,
@@ -229,18 +259,28 @@ async def process_listing(
                     "recent_sold_7d": ebay_data.recent_sold_7d,
                     "query": search_query,
                 },
-            )
-            session.add(pe)
+            ))
+
+        # ── Blend eMAG + eBay ────────────────────────────────────────────────
+        # eMAG reflects the Romanian market (RON, no conversion).
+        # eBay reflects global demand (good proxy for resale ceiling).
+        # When both are available, weighted blend: eMAG 60 / eBay 40.
+        if emag_value_ron > 0 and ebay_value_ron > 0:
+            final_value_ron = emag_value_ron * 0.6 + ebay_value_ron * 0.4
+            final_confidence = max(emag_confidence, ebay_confidence)
+        elif emag_value_ron > 0:
+            final_value_ron = emag_value_ron
+            final_confidence = emag_confidence
+        else:
+            final_value_ron = ebay_value_ron
+            final_confidence = ebay_confidence
 
         # ── LLM fallback ────────────────────────────────────────────────────
-        final_value_ron = ebay_value_ron
-        final_confidence = ebay_confidence
-
         min_for_confidence = pricing_cfg.get("min_sold_for_medium_confidence", 3)
         needs_llm = (
             llm_estimator is not None
             and pricing_cfg.get("llm_fallback_enabled", True)
-            and (ebay_confidence < 0.6 or sold_count < min_for_confidence)
+            and (final_confidence < 0.6 or (sold_count < min_for_confidence and emag_value_ron == 0))
         )
 
         if needs_llm:
@@ -250,6 +290,7 @@ async def process_listing(
                 condition=raw.condition,
                 platform=raw.platform,
                 category=raw.category,
+                ner_entities=ner_entities or None,
             )
             if llm_est.estimated_value_usd > 0 and not llm_est.error:
                 llm_value_ron = llm_estimator.to_ron(llm_est.estimated_value_usd)
@@ -262,15 +303,14 @@ async def process_listing(
                     raw_data={"demand_notes": llm_est.demand_notes},
                 ))
 
-                if ebay_value_ron > 0:
-                    # Blend: eBay is more trusted
-                    blend_weight = min(0.8, ebay_confidence)
-                    final_value_ron = ebay_value_ron * blend_weight + llm_value_ron * (1 - blend_weight)
-                    final_confidence = max(ebay_confidence, llm_est.confidence * 0.7)
+                if final_value_ron > 0:
+                    # Blend LLM with market data — LLM gets 20% weight
+                    final_value_ron = final_value_ron * 0.8 + llm_value_ron * 0.2
+                    final_confidence = max(final_confidence, llm_est.confidence * 0.7)
                 else:
                     final_value_ron = llm_value_ron
-                    final_confidence = llm_est.confidence * 0.7  # LLM alone is less reliable
-                    demand_score = max(demand_score, 25.0)  # assume some demand if LLM has a price
+                    final_confidence = llm_est.confidence * 0.7
+                    demand_score = max(demand_score, 25.0)
 
         # ── Score ────────────────────────────────────────────────────────────
         if final_value_ron <= 0:
@@ -337,6 +377,7 @@ async def run_scan(config: dict):
         except Exception as e:
             print(f"[Agent] LLM estimator unavailable: {e}")
 
+    emag_pricer = EmagPricer()
     scorer = DealScorer(scoring_cfg)
     active_categories = [c for c in categories if c.get("enabled", True)]
 
@@ -383,19 +424,22 @@ async def run_scan(config: dict):
     print(f"[Agent] Total listings collected: {len(all_listings)}")
 
     ebay_cache: dict[str, EbayMarketData] = {}
+    emag_cache: dict[str, EmagMarketData] = {}
     good_deals = 0
     for raw in all_listings:
         try:
             is_deal = await process_listing(
-                raw, ebay_pricer, llm_estimator, scorer,
+                raw, ebay_pricer, emag_pricer, llm_estimator, scorer,
                 pricing_cfg, scoring_cfg, price_config,
                 ebay_cache=ebay_cache,
+                emag_cache=emag_cache,
             )
             if is_deal:
                 good_deals += 1
         except Exception as e:
             print(f"[Agent] Error processing '{raw.title}': {e}")
 
+    await emag_pricer.close()
     print(f"[Agent] Scan complete. Good deals found: {good_deals}/{len(all_listings)}")
     return good_deals
 

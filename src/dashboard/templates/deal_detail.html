@@ -151,12 +151,18 @@
       {% for est in estimates %}
       <div class="bg-gray-800 rounded-lg p-3 mb-2">
         <div class="flex items-center justify-between mb-1">
-          <span class="text-xs font-mono text-gray-400">{{ est.method }}</span>
+          <div class="flex items-center gap-1.5">
+            <span class="text-xs font-mono
+              {% if est.method == 'emag' %}text-green-400
+              {% elif est.method == 'ebay_sold' %}text-amber-400
+              {% else %}text-purple-400{% endif %}">{{ est.method }}</span>
+            {% if est.method == 'emag' %}<span class="text-[10px] text-green-600">RO</span>{% endif %}
+          </div>
           <span class="text-sm font-bold text-white">{{ est.estimated_value_ron | int }} RON</span>
         </div>
         <div class="text-xs text-gray-500">
           Confidence: {{ (est.confidence * 100) | int }}%
-          {% if est.sold_count %} · {{ est.sold_count }} sold{% endif %}
+          {% if est.sold_count %} · {{ est.sold_count }} {% if est.method == 'emag' %}listings{% else %}sold{% endif %}{% endif %}
         </div>
         {% if est.llm_reasoning %}
         <div class="text-xs text-gray-500 mt-1 italic">{{ est.llm_reasoning }}</div>
