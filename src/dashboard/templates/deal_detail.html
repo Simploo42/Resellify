@@ -39,6 +39,23 @@
       </div>
       {% endif %}
 
+      {% if listing.ner_entities %}
+      <div class="flex flex-wrap gap-2 mb-3">
+        {% for label, value in listing.ner_entities.items() %}
+        <span class="text-xs px-2 py-0.5 rounded-full border
+          {% if label == 'brand' %}border-blue-700 text-blue-300 bg-blue-950
+          {% elif label == 'model' %}border-purple-700 text-purple-300 bg-purple-950
+          {% elif label == 'variant' %}border-indigo-700 text-indigo-300 bg-indigo-950
+          {% elif label == 'condition' %}border-green-700 text-green-300 bg-green-950
+          {% elif label == 'color' %}border-pink-700 text-pink-300 bg-pink-950
+          {% else %}border-gray-700 text-gray-400 bg-gray-900{% endif %}">
+          <span class="opacity-60 uppercase tracking-wide text-[10px]">{{ label }}</span>
+          <span class="ml-1 font-medium">{{ value }}</span>
+        </span>
+        {% endfor %}
+      </div>
+      {% endif %}
+
       {% if listing.description %}
       <div class="text-sm text-gray-400 leading-relaxed whitespace-pre-wrap">{{ listing.description[:800] }}</div>
       {% endif %}

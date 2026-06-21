@@ -43,6 +43,8 @@ class Listing(Base):
     price_drop_ron = Column(Float, default=0.0)      # total drop since first seen
     price_drop_pct = Column(Float, default=0.0)      # % drop since first seen
     price_changes = Column(Integer, default=0)       # number of observed changes
+    # NER entities extracted from the title
+    ner_entities = Column(JSON, default=dict)        # {"brand": "Samsung", "model": "Galaxy S24", ...}
 
     __table_args__ = (
         Index("ix_listings_platform", "platform"),
@@ -144,6 +146,15 @@ AsyncSessionLocal = async_sessionmaker(async_engine, class_=AsyncSession, expire
 async def init_db():
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Add ner_entities column to existing databases that predate it
+        try:
+            await conn.execute(
+                __import__("sqlalchemy").text(
+                    "ALTER TABLE listings ADD COLUMN ner_entities JSON DEFAULT '{}'"
+                )
+            )
+        except Exception:
+            pass  # column already exists
 
 
 async def get_db() -> AsyncSession:

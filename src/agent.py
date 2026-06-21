@@ -29,6 +29,25 @@ from .title_engine.query_builder import build_ebay_query
 _running = False
 _last_scan: dict[str, datetime] = {}
 
+# Lazy NER singleton — loaded once on first use if the trained model exists.
+_ner = None
+_ner_loaded = False
+
+def _get_ner():
+    global _ner, _ner_loaded
+    if _ner_loaded:
+        return _ner
+    _ner_loaded = True
+    model_path = __import__("pathlib").Path("models/title_ner/model-best")
+    if model_path.exists():
+        try:
+            from .title_engine.inference import TitleNER
+            _ner = TitleNER(model_path)
+            print(f"[Agent] NER model loaded from {model_path}")
+        except Exception as e:
+            print(f"[Agent] NER model unavailable: {e}")
+    return _ner
+
 
 def load_config(path: str = "config/settings.yaml") -> dict:
     with open(path) as f:
@@ -148,11 +167,29 @@ async def process_listing(
         session.add(listing)
         await session.flush()
 
-        # ── eBay pricing ────────────────────────────────────────────────────
-        # Build a clean canonical query from the title using regex/gazetteer tags.
-        # This replaces the raw truncated title, improving eBay result accuracy.
+        # ── NER entity extraction ────────────────────────────────────────────
         _tokens = tokenize(raw.title)
-        _tags = prefill(_tokens)
+        ner = _get_ner()
+        ner_entities: dict = {}
+        if ner is not None:
+            try:
+                spans = ner.tag(raw.title)
+                # Collect first occurrence of each entity type
+                for sp in spans:
+                    label = sp.label.lower()
+                    if label not in ner_entities:
+                        ner_entities[label] = " ".join(_tokens[sp.start:sp.end])
+                _tags = ner.tag_bio(raw.title)[1]
+            except Exception as e:
+                print(f"[Agent] NER error on '{raw.title[:40]}': {e}")
+                _tags = prefill(_tokens)
+        else:
+            _tags = prefill(_tokens)
+
+        listing.ner_entities = ner_entities
+
+        # ── eBay pricing ────────────────────────────────────────────────────
+        # Build a clean canonical query — NER tags if available, else regex/gazetteer.
         search_query = build_ebay_query(_tokens, _tags)
         if search_query != raw.title[:80]:
             print(f"[Agent] Canonical query: {search_query!r}  (was: {raw.title[:60]!r})")
