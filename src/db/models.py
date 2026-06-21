@@ -5,6 +5,7 @@ from sqlalchemy import (
     create_engine, event
 )
 from sqlalchemy.orm import DeclarativeBase, Session
+from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 DATABASE_URL = "sqlite+aiosqlite:///./resellify.db"
@@ -139,13 +140,31 @@ class ScanLog(Base):
     )
 
 
-async_engine = create_async_engine(DATABASE_URL, echo=False)
+async_engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    poolclass=NullPool,          # each session gets its own connection — no shared state
+    connect_args={"timeout": 30},
+)
 AsyncSessionLocal = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+@event.listens_for(async_engine.sync_engine, "connect")
+def _set_sqlite_pragmas(dbapi_conn, _record):
+    """Applied to every new SQLite connection — guarantees WAL + generous busy timeout."""
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA busy_timeout=30000")   # 30 s — outlasts any realistic write
+    cur.execute("PRAGMA synchronous=NORMAL")   # safe with WAL, faster than FULL
+    cur.close()
 
 
 async def init_db():
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # WAL mode: concurrent reads, serialised writes, no busy-lock on SELECT
+        await conn.execute(__import__("sqlalchemy").text("PRAGMA journal_mode=WAL"))
+        await conn.execute(__import__("sqlalchemy").text("PRAGMA busy_timeout=10000"))
         # Add ner_entities column to existing databases that predate it
         try:
             await conn.execute(

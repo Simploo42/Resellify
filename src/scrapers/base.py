@@ -1,9 +1,12 @@
 from abc import ABC, abstractmethod
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 import asyncio
 import random
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -63,5 +66,5 @@ class BaseScraper(ABC):
                     all_listings.extend(results)
                     await self._random_delay()
                 except Exception as e:
-                    print(f"[{self.__class__.__name__}] Error searching '{keyword}': {e}")
+                    logger.info(f"[{self.__class__.__name__}] Error searching '{keyword}': {e}")
         return all_listings

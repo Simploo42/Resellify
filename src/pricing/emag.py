@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 import httpx
 from bs4 import BeautifulSoup
 
+from .normalize import filter_comparable
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -31,6 +33,7 @@ class EmagListing:
     price_ron: float
     url: str
     is_new: bool = True
+    image: str = ""
 
 
 @dataclass
@@ -75,13 +78,22 @@ def _extract_prices(soup: BeautifulSoup) -> list[EmagListing]:
     for card in cards:
         # Title
         title_el = (
-            card.select_one("[data-zone-name='title'] a")
-            or card.select_one(".card-v2-content a")
+            card.select_one(".card-v2-title")
+            or card.select_one("[data-zone-name='title'] a")
             or card.select_one(".product-title a")
             or card.select_one("h2 a")
             or card.select_one("h3 a")
         )
         title = title_el.get_text(strip=True) if title_el else ""
+        # Prefer the link's title attribute / image alt when text is a generic CTA
+        if not title or title.lower() in ("vezi detalii", "detalii", ""):
+            link = card.select_one("a[title]")
+            img = card.select_one("img[alt]")
+            title = (
+                (link.get("title", "").strip() if link else "")
+                or (img.get("alt", "").strip() if img else "")
+                or title
+            )
 
         # Price — try multiple selectors
         price_el = (
@@ -102,7 +114,15 @@ def _extract_prices(soup: BeautifulSoup) -> list[EmagListing]:
         if url and not url.startswith("http"):
             url = "https://www.emag.ro" + url
 
-        listings.append(EmagListing(title=title, price_ron=price, url=url))
+        # Image
+        img_el = card.select_one("img")
+        image = ""
+        if img_el:
+            image = (img_el.get("src") or img_el.get("data-src")
+                     or img_el.get("data-original")
+                     or img_el.get("srcset", "").split(" ")[0] or "")
+
+        listings.append(EmagListing(title=title, price_ron=price, url=url, image=image))
 
     return listings
 
@@ -136,10 +156,14 @@ class EmagPricer:
             await self._client.aclose()
             self._client = None
 
-    async def get_market_data(self, query: str) -> EmagMarketData:
+    async def get_market_data(self, query: str, price_hint: float | None = None) -> EmagMarketData:
         """
         Search eMAG Romania for `query` and return current price stats in RON.
         Uses the first page of results (typically 36 products).
+
+        `price_hint` (the source listing's asking price) is used to drop
+        accessories and out-of-band products so the median reflects the
+        real device, not cases/chargers/RAM that pull the value down.
         """
         if not query.strip():
             return EmagMarketData(query=query, error="empty query")
@@ -157,6 +181,13 @@ class EmagPricer:
 
         if not listings:
             return EmagMarketData(query=query, error="no listings found")
+
+        # Normalize: strip accessories/spare-parts + price-band + IQR outliers
+        # so the new-retail ceiling reflects the actual product.
+        listings = filter_comparable(
+            listings, price_attr="price_ron", title_attr="title",
+            price_hint=price_hint,
+        )
 
         prices = [l.price_ron for l in listings]
         mn, mx, avg, med = _stats(prices)

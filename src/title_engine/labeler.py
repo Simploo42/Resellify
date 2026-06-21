@@ -6,6 +6,7 @@ Spec §2: temperature 0, JSON-only, uncertain_idx field, pre-filled regex/gazett
 """
 import asyncio
 import json
+import logging
 import os
 import textwrap
 from dataclasses import dataclass, field, asdict
@@ -13,6 +14,8 @@ from datetime import datetime
 from typing import Optional
 
 from .tokenizer import tokenize, TOKENIZER_VERSION, SCHEMA_VERSION, VALID_LABELS
+
+logger = logging.getLogger(__name__)
 
 LABELER_MODEL = "claude-haiku-4-5-20251001"
 # OpenRouter model name for the same model
@@ -184,7 +187,7 @@ class HaikuLabeler:
             batch = tokenized[i : i + self.batch_size]
             batch_num = i // self.batch_size + 1
             total_batches = (total + self.batch_size - 1) // self.batch_size
-            print(f"[Labeler] Batch {batch_num}/{total_batches}  ({i+1}–{min(i+len(batch), total)}/{total} titles)", flush=True)
+            logger.info(f"[Labeler] Batch {batch_num}/{total_batches}  ({i+1}–{min(i+len(batch), total)}/{total} titles)")
             batch_records = await self._label_batch(batch)
             records.extend(batch_records)
 
@@ -220,7 +223,7 @@ class HaikuLabeler:
                         if m:
                             wait = int(float(m.group(1))) + 1
                     if "429" in msg and attempt < 5:
-                        print(f"[Labeler] 429 rate-limited — waiting {wait}s (attempt {attempt+1}/6)…", flush=True)
+                        logger.info(f"[Labeler] 429 rate-limited — waiting {wait}s (attempt {attempt+1}/6)…")
                         await asyncio.sleep(wait)
                         continue
                     raise
@@ -257,7 +260,7 @@ class HaikuLabeler:
         except Exception as e:
             import traceback as _tb
             snippet = repr(raw_text[:200]) if raw_text else '<no response>'
-            print(f"[Labeler] API/parse error on batch of {len(batch)}: {e} | raw={snippet}", flush=True)
+            logger.info(f"[Labeler] API/parse error on batch of {len(batch)}: {e} | raw={snippet}")
             _tb.print_exc()
             # Return placeholder records for the whole batch so the pipeline
             # routes them to the spot-check queue rather than crashing.
@@ -277,7 +280,7 @@ class HaikuLabeler:
             ]
 
         if not isinstance(parsed, list) or len(parsed) != len(batch):
-            print(f"[Labeler] Response length mismatch: got {len(parsed) if isinstance(parsed, list) else '?'}, expected {len(batch)}")
+            logger.info(f"[Labeler] Response length mismatch: got {len(parsed) if isinstance(parsed, list) else '?'}, expected {len(batch)}")
             parsed = parsed[:len(batch)] if isinstance(parsed, list) else []
             while len(parsed) < len(batch):
                 parsed.append({"tags": [], "confidence": 0.0, "uncertain_idx": []})

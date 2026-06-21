@@ -10,6 +10,7 @@ Approach (and the IQR outlier filter) adapted from kjanus03/olx-scrapper.
 """
 import re
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -18,6 +19,8 @@ from bs4 import BeautifulSoup
 
 from .base import BaseScraper, RawListing
 from .filters import filter_price_outliers
+
+logger = logging.getLogger(__name__)
 
 HEADERS = {
     "User-Agent": (
@@ -146,7 +149,7 @@ class OLXScraper(BaseScraper):
                 resp = await client.get(url)
                 resp.raise_for_status()
             except Exception as e:
-                print(f"[OLX] Error fetching page {page_num} for '{keyword}': {e}")
+                logger.info(f"[OLX] Error fetching page {page_num} for '{keyword}': {e}")
                 break
 
             page_listings = self._parse_page(resp.text, keyword, cat_name)
@@ -166,7 +169,7 @@ class OLXScraper(BaseScraper):
         if self.iqr_filter and len(listings) >= 4:
             kept, removed = filter_price_outliers(listings, lambda l: l.price)
             if removed:
-                print(f"[OLX] '{keyword}': dropped {len(removed)} price outlier(s)")
+                logger.info(f"[OLX] '{keyword}': dropped {len(removed)} price outlier(s)")
             listings = kept
 
         return listings
@@ -253,7 +256,7 @@ class OLXScraper(BaseScraper):
                 posted_at=posted_at,
             )
         except Exception as e:
-            print(f"[OLX] Error parsing card: {e}")
+            logger.info(f"[OLX] Error parsing card: {e}")
             return None
 
     async def get_listing_detail(self, url: str) -> dict:
@@ -288,5 +291,5 @@ class OLXScraper(BaseScraper):
             if images:
                 detail["images"] = images
         except Exception as e:
-            print(f"[OLX] Error fetching detail {url}: {e}")
+            logger.info(f"[OLX] Error fetching detail {url}: {e}")
         return detail

@@ -149,23 +149,56 @@
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-5">
       <h3 class="text-sm font-medium text-gray-300 mb-3">Price Estimates</h3>
       {% for est in estimates %}
-      <div class="bg-gray-800 rounded-lg p-3 mb-2">
+      <div class="bg-gray-800 rounded-lg p-3 mb-2" x-data="{ open: false }">
         <div class="flex items-center justify-between mb-1">
           <div class="flex items-center gap-1.5">
             <span class="text-xs font-mono
               {% if est.method == 'emag' %}text-green-400
+              {% elif est.method == 'olx_market' %}text-blue-400
+              {% elif est.method == 'facebook_market' %}text-indigo-400
               {% elif est.method == 'ebay_sold' %}text-amber-400
               {% else %}text-purple-400{% endif %}">{{ est.method }}</span>
             {% if est.method == 'emag' %}<span class="text-[10px] text-green-600">RO</span>{% endif %}
+            {% if est.method == 'olx_market' %}<span class="text-[10px] text-blue-700">used</span>{% endif %}
+            {% if est.method == 'facebook_market' %}<span class="text-[10px] text-indigo-600">used</span>{% endif %}
           </div>
           <span class="text-sm font-bold text-white">{{ est.estimated_value_ron | int }} RON</span>
         </div>
-        <div class="text-xs text-gray-500">
-          Confidence: {{ (est.confidence * 100) | int }}%
-          {% if est.sold_count %} · {{ est.sold_count }} {% if est.method == 'emag' %}listings{% else %}sold{% endif %}{% endif %}
+        <div class="flex items-center justify-between text-xs text-gray-500">
+          <span>
+            Confidence: {{ (est.confidence * 100) | int }}%
+            {% if est.sold_count %} · {{ est.sold_count }} {% if est.method == 'emag' %}listings{% elif est.method == 'olx_market' %}OLX listings{% elif est.method == 'facebook_market' %}FB listings{% else %}sold{% endif %}{% endif %}
+
+            {% if est.min_price_ron and est.max_price_ron %}
+            · range {{ est.min_price_ron | int }}–{{ est.max_price_ron | int }} RON
+            {% endif %}
+          </span>
+          {% set entries = est.raw_data.get('entries', []) if est.raw_data else [] %}
+          {% if entries %}
+          <button @click="open = !open"
+                  class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors ml-2"
+                  x-text="open ? 'hide sources ▲' : 'show sources ▼'"></button>
+          {% endif %}
         </div>
         {% if est.llm_reasoning %}
         <div class="text-xs text-gray-500 mt-1 italic">{{ est.llm_reasoning }}</div>
+        {% endif %}
+        {% set entries = est.raw_data.get('entries', []) if est.raw_data else [] %}
+        {% if entries %}
+        <div x-show="open" x-cloak class="mt-2 border-t border-gray-700 pt-2 space-y-1">
+          {% for item in entries %}
+          <a href="{{ item.url }}" target="_blank" rel="noopener"
+             class="flex items-center gap-2 text-[11px] rounded-md p-1 hover:bg-gray-700/50 transition-colors group"
+             title="{{ item.title }}">
+            {% if item.image %}
+            <img src="{{ item.image }}" loading="lazy" onerror="this.style.display='none'"
+                 class="w-10 h-10 flex-shrink-0 object-cover rounded bg-gray-700" />
+            {% endif %}
+            <span class="text-gray-400 group-hover:text-indigo-300 transition-colors truncate flex-1 leading-tight">{{ item.title or '—' }}</span>
+            <span class="flex-shrink-0 text-gray-300 font-mono">{{ item.price_ron | int }} RON</span>
+          </a>
+          {% endfor %}
+        </div>
         {% endif %}
       </div>
       {% endfor %}

@@ -11,12 +11,15 @@ CLI:
   python -m src.title_engine.inference "iPhone 13 128GB negru"
 """
 from __future__ import annotations
+import logging
 
 from pathlib import Path
 
 from spacy.tokens import Doc, Span
 
 from .tokenizer import TokenSpan, tokenize
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = Path("models/title_ner/model-best")
 
@@ -52,15 +55,15 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python -m src.title_engine.inference \"<title>\"")
+        logger.info("Usage: python -m src.title_engine.inference \"<title>\"")
         sys.exit(1)
 
     raw = " ".join(sys.argv[1:])
     ner = TitleNER()
     tokens, tags = ner.tag_bio(raw)
 
-    print(f"\nInput : {raw}")
-    print(f"Tokens: {tokens}\n")
+    logger.info(f"\nInput : {raw}")
+    logger.info(f"Tokens: {tokens}\n")
     col = max(len(t) for t in tokens) + 2
     for tok, tag in zip(tokens, tags):
-        print(f"  {tok:<{col}} {tag}")
+        logger.info(f"  {tok:<{col}} {tag}")

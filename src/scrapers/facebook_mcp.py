@@ -17,11 +17,14 @@ Set in config:
 """
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime
 from typing import Optional, Any
 
 from .base import BaseScraper, RawListing
+
+logger = logging.getLogger(__name__)
 
 # Romanian city coordinates (lat, lon)
 ROMANIA_CITY_COORDS: dict[str, tuple[float, float]] = {
@@ -179,7 +182,7 @@ class FacebookMCPScraper(BaseScraper):
         try:
             client = await self._get_client()
         except Exception as e:
-            print(f"[FB-MCP] Cannot start MCP server: {e}")
+            logger.info(f"[FB-MCP] Cannot start MCP server: {e}")
             return []
 
         price_range = category_config.get("price_range", {})
@@ -203,7 +206,7 @@ class FacebookMCPScraper(BaseScraper):
             result = await client.call_tool("search_listings", args)
             return self._parse_results(result, keyword, category_config.get("name", ""))
         except Exception as e:
-            print(f"[FB-MCP] Search error for '{keyword}': {e}")
+            logger.info(f"[FB-MCP] Search error for '{keyword}': {e}")
             return []
 
     def _parse_results(self, result: Any, keyword: str, category: str) -> list[RawListing]:
@@ -229,7 +232,7 @@ class FacebookMCPScraper(BaseScraper):
                 if parsed:
                     listings.append(parsed)
             except Exception as e:
-                print(f"[FB-MCP] Parse error: {e}")
+                logger.info(f"[FB-MCP] Parse error: {e}")
 
         return listings
 
@@ -362,5 +365,5 @@ class FacebookMCPScraper(BaseScraper):
             result = await client.call_tool("get_listing", {"listing_id": id_match.group(1)})
             return result if isinstance(result, dict) else {}
         except Exception as e:
-            print(f"[FB-MCP] get_listing error: {e}")
+            logger.info(f"[FB-MCP] get_listing error: {e}")
             return {}

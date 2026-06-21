@@ -2,6 +2,7 @@
 Main orchestrator: schedules scraping, runs pricing and scoring, saves to DB.
 """
 import asyncio
+import logging
 import time
 from datetime import datetime
 from typing import Optional
@@ -13,6 +14,7 @@ from .db.models import (
     AsyncSessionLocal, Listing, PriceEstimate, DealScore, ScanLog,
     PriceChange, init_db
 )
+from .events import broadcast_deal, broadcast_pipeline
 from .scrapers.base import RawListing
 from .scrapers.olx_mcp import OLXMCPScraper
 from .scrapers.olx import OLXScraper                    # HTTP (httpx+BS4) fallback
@@ -21,14 +23,19 @@ from .scrapers.facebook import FacebookMarketplaceScraper # Playwright fallback
 from .scrapers.ebay_scraper import EbayScraper
 from .pricing.ebay_sold import EbaySoldPricer, EbayMarketData
 from .pricing.emag import EmagPricer, EmagMarketData
+from .pricing.olx_pricer import OLXPricer, OLXMarketData
+from .pricing.facebook_pricer import FacebookPricer, FBMarketData
 from .pricing.llm_estimator import LLMPriceEstimator
 from .scoring.deal_scorer import DealScorer
 from .title_engine.tokenizer import tokenize
 from .title_engine.cross_checker import prefill
 from .title_engine.query_builder import build_ebay_query
 
+logger = logging.getLogger(__name__)
+
 _running = False
 _last_scan: dict[str, datetime] = {}
+_scan_lock = asyncio.Lock()  # ensures only one scan runs at a time
 
 # Lazy NER singleton — loaded once on first use if the trained model exists.
 _ner = None
@@ -44,9 +51,9 @@ def _get_ner():
         try:
             from .title_engine.inference import TitleNER
             _ner = TitleNER(model_path)
-            print(f"[Agent] NER model loaded from {model_path}")
+            logger.info(f"[Agent] NER model loaded from {model_path}")
         except Exception as e:
-            print(f"[Agent] NER model unavailable: {e}")
+            logger.info(f"[Agent] NER model unavailable: {e}")
     return _ner
 
 
@@ -65,34 +72,49 @@ def convert_price_to_ron(price: float, currency: str, config: dict) -> float:
     return round(price * rates.get(currency.upper(), 1.0), 2)
 
 
+def _demand_from_olx(listing_count: int) -> float:
+    """
+    Estimate market presence 0-100 from OLX active similar-listing count.
+    This is a supply-side proxy — more listings means the item exists on the
+    market, not that it sells fast. Keep scores conservative (max 45).
+    0 OLX listings = niche/unknown item (score 10).
+    """
+    if listing_count >= 30: return 45.0
+    if listing_count >= 15: return 35.0
+    if listing_count >= 7:  return 25.0
+    if listing_count >= 3:  return 18.0
+    if listing_count >= 1:  return 12.0
+    return 8.0
+
 async def process_listing(
     raw: RawListing,
-    ebay_pricer: EbaySoldPricer,
     emag_pricer: EmagPricer,
+    olx_pricer: OLXPricer,
+    fb_pricer: Optional[FacebookPricer],
     llm_estimator: Optional[LLMPriceEstimator],
     scorer: DealScorer,
     pricing_cfg: dict,
     scoring_cfg: dict,
     price_config: dict,
-    ebay_cache: Optional[dict[str, EbayMarketData]] = None,
     emag_cache: Optional[dict[str, EmagMarketData]] = None,
+    olx_cache: Optional[dict[str, OLXMarketData]] = None,
+    fb_cache: Optional[dict[str, FBMarketData]] = None,
 ) -> bool:
-    """Price and score a single listing. Returns True if it's a good deal."""
+    """
+    Price and score a single listing.
+    Three short-lived DB sessions — no write lock ever held during HTTP calls.
+    """
     price_ron = convert_price_to_ron(raw.price, raw.currency, price_config)
-    min_profit = scoring_cfg.get("min_profit_percent", 15)
     min_profit_ron = scoring_cfg.get("min_profit_ron", 50)
 
+    # ── Session 1: check existing / fast-path update ─────────────────────────
     async with AsyncSessionLocal() as session:
-        # Check if we've already processed this listing recently
-        result = await session.execute(
-            select(Listing).where(Listing.id == raw.listing_id)
-        )
+        result = await session.execute(select(Listing).where(Listing.id == raw.listing_id))
         existing = result.scalar_one_or_none()
         if existing:
-            price_dropped = False
             old_price = existing.price_ron or price_ron
+            price_dropped = False
             if abs(price_ron - old_price) >= 0.01:
-                # Price changed since we last saw this listing — record it.
                 delta = price_ron - old_price
                 delta_pct = (delta / old_price * 100) if old_price else 0.0
                 session.add(PriceChange(
@@ -111,20 +133,16 @@ async def process_listing(
                 existing.price_drop_pct = round(total_drop / first_price * 100, 1) if first_price else 0.0
                 existing.price_changes = (existing.price_changes or 0) + 1
                 price_dropped = delta < 0
-                print(f"[Agent] Price change on '{existing.title[:40]}': "
+                logger.info(f"[Agent] Price change on '{existing.title[:40]}': "
                       f"{old_price:.0f} -> {price_ron:.0f} RON ({delta_pct:+.1f}%)")
-
             existing.last_seen_at = datetime.utcnow()
             existing.is_active = True
-
             if not price_dropped:
                 await session.commit()
                 return False
-            # Price dropped — re-score against the existing estimate (cheap path)
-            score_result = await session.execute(
-                select(DealScore).where(DealScore.listing_id == raw.listing_id)
-            )
-            ds = score_result.scalar_one_or_none()
+            # Price dropped — re-score cheaply without any HTTP calls
+            score_res = await session.execute(select(DealScore).where(DealScore.listing_id == raw.listing_id))
+            ds = score_res.scalar_one_or_none()
             if ds and ds.estimated_value_ron > 0:
                 rescored = scorer.score(
                     asking_price_ron=price_ron,
@@ -146,8 +164,25 @@ async def process_listing(
             await session.commit()
             return False
 
-        # Save listing
-        listing = Listing(
+        # New listing — commit immediately so no write lock is held during HTTP calls
+        _tokens = tokenize(raw.title)
+        ner = _get_ner()
+        ner_entities: dict = {}
+        if ner is not None:
+            try:
+                spans = ner.tag(raw.title)
+                for sp in spans:
+                    label = sp.label.lower()
+                    if label not in ner_entities:
+                        ner_entities[label] = " ".join(_tokens[sp.start:sp.end])
+                _tags = ner.tag_bio(raw.title)[1]
+            except Exception as e:
+                logger.info(f"[Agent] NER error on '{raw.title[:40]}': {e}")
+                _tags = prefill(_tokens)
+        else:
+            _tags = prefill(_tokens)
+
+        session.add(Listing(
             id=raw.listing_id,
             platform=raw.platform,
             external_id=raw.external_id,
@@ -166,187 +201,230 @@ async def process_listing(
             category=raw.category,
             matched_keyword=raw.matched_keyword,
             posted_at=raw.posted_at,
-        )
-        session.add(listing)
-        await session.flush()
+            ner_entities=ner_entities,
+        ))
+        await session.commit()
+    # write lock released — session 1 closed
 
-        # ── NER entity extraction ────────────────────────────────────────────
-        _tokens = tokenize(raw.title)
-        ner = _get_ner()
-        ner_entities: dict = {}
-        if ner is not None:
-            try:
-                spans = ner.tag(raw.title)
-                # Collect first occurrence of each entity type
-                for sp in spans:
-                    label = sp.label.lower()
-                    if label not in ner_entities:
-                        ner_entities[label] = " ".join(_tokens[sp.start:sp.end])
-                _tags = ner.tag_bio(raw.title)[1]
-            except Exception as e:
-                print(f"[Agent] NER error on '{raw.title[:40]}': {e}")
-                _tags = prefill(_tokens)
+    # ── HTTP pricing calls — NO open DB session ───────────────────────────────
+    search_query = build_ebay_query(_tokens, _tags)
+    if search_query != raw.title[:80]:
+        logger.info(f"[Agent] Canonical query: {search_query!r}  (was: {raw.title[:60]!r})")
+
+    olx_cache_key = f"{search_query}|{int(price_ron)}"
+    if olx_cache is not None and olx_cache_key in olx_cache:
+        olx_data = olx_cache[olx_cache_key]
+    else:
+        olx_data = await olx_pricer.get_market_data(search_query, price_hint=price_ron)
+        if olx_cache is not None:
+            olx_cache[olx_cache_key] = olx_data
+
+    olx_value_ron = 0.0
+    olx_confidence = 0.0
+    if olx_data.listing_count > 0:
+        olx_value_ron = olx_data.median_price_ron
+        olx_confidence = olx_data.confidence
+        logger.info(f"[Agent] OLX market: {olx_data.listing_count} listings, "
+              f"median {olx_value_ron:.0f} RON for {search_query!r}")
+
+    # Facebook Marketplace — second used-market source
+    fb_data: Optional[FBMarketData] = None
+    fb_value_ron = 0.0
+    fb_confidence = 0.0
+    if fb_pricer is not None:
+        fb_cache_key = f"{search_query}|{int(price_ron)}"
+        if fb_cache is not None and fb_cache_key in fb_cache:
+            fb_data = fb_cache[fb_cache_key]
         else:
-            _tags = prefill(_tokens)
+            fb_data = await fb_pricer.get_market_data(search_query, price_hint=price_ron)
+            if fb_cache is not None:
+                fb_cache[fb_cache_key] = fb_data
+        if fb_data and fb_data.listing_count > 0:
+            fb_value_ron = fb_data.median_price_ron
+            fb_confidence = fb_data.confidence
+            logger.info(f"[Agent] FB market: {fb_data.listing_count} listings, "
+                  f"median {fb_value_ron:.0f} RON for {search_query!r}")
 
-        listing.ner_entities = ner_entities
+    emag_cache_key = search_query
+    if emag_cache is not None and emag_cache_key in emag_cache:
+        emag_data = emag_cache[emag_cache_key]
+    else:
+        emag_data = await emag_pricer.get_market_data(search_query, price_hint=price_ron)
+        if emag_cache is not None:
+            emag_cache[emag_cache_key] = emag_data
 
-        # ── eBay pricing ────────────────────────────────────────────────────
-        # Build a clean canonical query — NER tags if available, else regex/gazetteer.
-        search_query = build_ebay_query(_tokens, _tags)
-        if search_query != raw.title[:80]:
-            print(f"[Agent] Canonical query: {search_query!r}  (was: {raw.title[:60]!r})")
+    emag_ceiling_ron = 0.0
+    if emag_data.listing_count > 0:
+        emag_ceiling_ron = emag_data.median_price_ron * 0.90
+        logger.info(f"[Agent] eMAG ceiling: {emag_ceiling_ron:.0f} RON (new median {emag_data.median_price_ron:.0f})")
 
-        # ── eMAG pricing (primary RON source) ───────────────────────────────
-        if emag_cache is not None and search_query in emag_cache:
-            emag_data = emag_cache[search_query]
+    _fb_count = fb_data.listing_count if fb_data else 0
+    demand_score = _demand_from_olx(olx_data.listing_count + _fb_count)
+
+    # Blend the used-market sources (OLX + Facebook) by confidence weighting.
+    # Both reflect what used items actually sell for locally.
+    used_parts: list[tuple[float, float]] = []  # (value, weight)
+    if olx_value_ron > 0:
+        used_parts.append((olx_value_ron, max(olx_confidence, 0.1)))
+    if fb_value_ron > 0:
+        used_parts.append((fb_value_ron, max(fb_confidence, 0.1)))
+
+    if used_parts:
+        wsum = sum(w for _, w in used_parts)
+        used_value_ron = sum(v * w for v, w in used_parts) / wsum
+        # Confidence rises when both sources agree/exist.
+        used_confidence = min(1.0, max(c for _, c in used_parts) + (0.1 if len(used_parts) > 1 else 0.0))
+        # eMAG = NEW retail; used value must never exceed the new-price ceiling.
+        if emag_ceiling_ron > 0:
+            final_value_ron = min(used_value_ron, emag_ceiling_ron)
         else:
-            emag_data = await emag_pricer.get_market_data(search_query)
-            if emag_cache is not None:
-                emag_cache[search_query] = emag_data
+            final_value_ron = used_value_ron
+        final_confidence = used_confidence
+    elif emag_ceiling_ron > 0:
+        # No used data \
+        final_value_ron = emag_data.median_price_ron * 0.65
+        final_confidence = emag_data.confidence * 0.5
+    else:
+        final_value_ron = 0.0
+        final_confidence = 0.0
 
-        emag_value_ron = 0.0
-        emag_confidence = 0.0
-        if emag_data.listing_count > 0:
-            emag_value_ron = emag_data.median_price_ron
-            emag_confidence = emag_data.confidence
+    # LLM fallback when confidence is too low
+    min_for_confidence = pricing_cfg.get("min_sold_for_medium_confidence", 3)
+    if llm_estimator is not None and pricing_cfg.get("llm_fallback_enabled", True) and final_confidence < 0.4:
+        try:
+            llm_est = await llm_estimator.estimate(
+                title=raw.title, description=raw.description or "",
+                condition=raw.condition, platform=raw.platform,
+                category=raw.category, ner_entities=ner_entities or None,
+            )
+            if llm_est.estimated_value_usd > 0 and not llm_est.error:
+                llm_value_ron = llm_estimator.to_ron(llm_est.estimated_value_usd)
+                if final_value_ron > 0:
+                    final_value_ron = final_value_ron * 0.8 + llm_value_ron * 0.2
+                    final_confidence = max(final_confidence, llm_est.confidence * 0.6)
+                else:
+                    final_value_ron = llm_value_ron * 0.65
+                    final_confidence = llm_est.confidence * 0.5
+                    demand_score = max(demand_score, 20.0)
+        except Exception:
+            pass
+
+    if final_value_ron <= 0:
+        broadcast_pipeline({"type": "scored", "id": raw.listing_id, "score": 0, "is_deal": False})
+        return False
+
+    scored = scorer.score(
+        asking_price_ron=price_ron,
+        estimated_value_ron=final_value_ron,
+        demand_score=demand_score,
+        confidence=final_confidence,
+        condition=raw.condition,
+        sold_count=olx_data.listing_count,
+        recent_sold_30d=0,
+        platform=raw.platform,
+    )
+
+    # ── Session 2: save price estimates + score ───────────────────────────────
+    async with AsyncSessionLocal() as session:
+        if olx_data.listing_count > 0:
             session.add(PriceEstimate(
-                listing_id=raw.listing_id,
-                method="emag",
-                estimated_value_ron=emag_value_ron,
-                confidence=emag_confidence,
+                listing_id=raw.listing_id, method="olx_market",
+                estimated_value_ron=olx_value_ron, confidence=olx_confidence,
+                sold_count=olx_data.listing_count,
+                avg_price_ron=olx_data.avg_price_ron,
+                min_price_ron=olx_data.min_price_ron,
+                max_price_ron=olx_data.max_price_ron,
+                raw_data={
+                    "query": search_query,
+                    "entries": [
+                        {"title": e.title, "price_ron": e.price_ron, "url": e.url,
+                         "image": getattr(e, "image", "")}
+                        for e in olx_data.entries[:12]
+                    ],
+                },
+            ))
+        if fb_data and fb_data.listing_count > 0:
+            session.add(PriceEstimate(
+                listing_id=raw.listing_id, method="facebook_market",
+                estimated_value_ron=fb_value_ron, confidence=fb_confidence,
+                sold_count=fb_data.listing_count,
+                avg_price_ron=fb_data.avg_price_ron,
+                min_price_ron=fb_data.min_price_ron,
+                max_price_ron=fb_data.max_price_ron,
+                raw_data={
+                    "query": search_query,
+                    "entries": [
+                        {"title": e.title, "price_ron": e.price_ron, "url": e.url,
+                         "image": getattr(e, "image", "")}
+                        for e in fb_data.entries[:12]
+                    ],
+                },
+            ))
+        if emag_data.listing_count > 0:
+            session.add(PriceEstimate(
+                listing_id=raw.listing_id, method="emag",
+                estimated_value_ron=emag_data.median_price_ron,
+                confidence=emag_data.confidence,
                 sold_count=emag_data.listing_count,
                 avg_price_ron=emag_data.avg_price_ron,
                 min_price_ron=emag_data.min_price_ron,
                 max_price_ron=emag_data.max_price_ron,
-                raw_data={"query": search_query, "listing_count": emag_data.listing_count},
-            ))
-            print(f"[Agent] eMAG: {emag_data.listing_count} listings, "
-                  f"median {emag_value_ron:.0f} RON for {search_query!r}")
-
-        # ── eBay pricing (demand signal + global validation) ─────────────────
-        if ebay_cache is not None and search_query in ebay_cache:
-            ebay_data = ebay_cache[search_query]
-        else:
-            ebay_data = await ebay_pricer.get_market_data(search_query)
-            if ebay_cache is not None:
-                ebay_cache[search_query] = ebay_data
-
-        ebay_value_ron = 0.0
-        ebay_confidence = 0.0
-        demand_score = 0.0
-        sold_count = 0
-        recent_30d = 0
-
-        if ebay_data.avg_price_usd > 0:
-            ebay_value_ron = ebay_pricer.to_ron(ebay_data.avg_price_usd)
-            ebay_confidence = ebay_data.confidence
-            demand_score = ebay_pricer.demand_score(ebay_data)
-            sold_count = ebay_data.sold_count
-            recent_30d = ebay_data.recent_sold_30d
-
-            session.add(PriceEstimate(
-                listing_id=raw.listing_id,
-                method="ebay_sold",
-                estimated_value_ron=ebay_value_ron,
-                confidence=ebay_confidence,
-                sold_count=sold_count,
-                avg_price_ron=ebay_pricer.to_ron(ebay_data.avg_price_usd),
-                min_price_ron=ebay_pricer.to_ron(ebay_data.min_price_usd),
-                max_price_ron=ebay_pricer.to_ron(ebay_data.max_price_usd),
                 raw_data={
-                    "recent_sold_30d": recent_30d,
-                    "recent_sold_7d": ebay_data.recent_sold_7d,
                     "query": search_query,
+                    "ceiling": True,
+                    "entries": [
+                        {"title": e.title, "price_ron": e.price_ron, "url": e.url,
+                         "image": getattr(e, "image", "")}
+                        for e in emag_data.listings[:12]
+                    ],
                 },
             ))
-
-        # ── Blend eMAG + eBay ────────────────────────────────────────────────
-        # eMAG reflects the Romanian market (RON, no conversion).
-        # eBay reflects global demand (good proxy for resale ceiling).
-        # When both are available, weighted blend: eMAG 60 / eBay 40.
-        if emag_value_ron > 0 and ebay_value_ron > 0:
-            final_value_ron = emag_value_ron * 0.6 + ebay_value_ron * 0.4
-            final_confidence = max(emag_confidence, ebay_confidence)
-        elif emag_value_ron > 0:
-            final_value_ron = emag_value_ron
-            final_confidence = emag_confidence
-        else:
-            final_value_ron = ebay_value_ron
-            final_confidence = ebay_confidence
-
-        # ── LLM fallback ────────────────────────────────────────────────────
-        min_for_confidence = pricing_cfg.get("min_sold_for_medium_confidence", 3)
-        needs_llm = (
-            llm_estimator is not None
-            and pricing_cfg.get("llm_fallback_enabled", True)
-            and (final_confidence < 0.6 or (sold_count < min_for_confidence and emag_value_ron == 0))
-        )
-
-        if needs_llm:
-            llm_est = await llm_estimator.estimate(
-                title=raw.title,
-                description=raw.description or "",
-                condition=raw.condition,
-                platform=raw.platform,
-                category=raw.category,
-                ner_entities=ner_entities or None,
-            )
-            if llm_est.estimated_value_usd > 0 and not llm_est.error:
-                llm_value_ron = llm_estimator.to_ron(llm_est.estimated_value_usd)
-                session.add(PriceEstimate(
-                    listing_id=raw.listing_id,
-                    method="llm",
-                    estimated_value_ron=llm_value_ron,
-                    confidence=llm_est.confidence,
-                    llm_reasoning=llm_est.reasoning,
-                    raw_data={"demand_notes": llm_est.demand_notes},
-                ))
-
-                if final_value_ron > 0:
-                    # Blend LLM with market data — LLM gets 20% weight
-                    final_value_ron = final_value_ron * 0.8 + llm_value_ron * 0.2
-                    final_confidence = max(final_confidence, llm_est.confidence * 0.7)
-                else:
-                    final_value_ron = llm_value_ron
-                    final_confidence = llm_est.confidence * 0.7
-                    demand_score = max(demand_score, 25.0)
-
-        # ── Score ────────────────────────────────────────────────────────────
-        if final_value_ron <= 0:
-            await session.commit()
-            return False
-
-        result = scorer.score(
-            asking_price_ron=price_ron,
-            estimated_value_ron=final_value_ron,
-            demand_score=demand_score,
-            confidence=final_confidence,
-            condition=raw.condition,
-            sold_count=sold_count,
-            recent_sold_30d=recent_30d,
-            platform=raw.platform,
-        )
-
         session.add(DealScore(
             listing_id=raw.listing_id,
-            total_score=result.total_score,
-            profit_score=result.profit_score,
-            demand_score=result.demand_score,
-            confidence_score=result.confidence_score,
-            risk_score=result.risk_score,
+            total_score=scored.total_score,
+            profit_score=scored.profit_score,
+            demand_score=scored.demand_score,
+            confidence_score=scored.confidence_score,
+            risk_score=scored.risk_score,
             asking_price_ron=price_ron,
             estimated_value_ron=final_value_ron,
-            estimated_profit_ron=result.estimated_profit_ron,
-            profit_percent=result.profit_percent,
-            notes=result.notes,
+            estimated_profit_ron=scored.estimated_profit_ron,
+            profit_percent=scored.profit_percent,
+            notes=scored.notes,
         ))
-
         await session.commit()
-        return result.is_good_deal and result.estimated_profit_ron >= min_profit_ron
+
+    is_deal = scored.is_good_deal and scored.estimated_profit_ron >= min_profit_ron
+    broadcast_pipeline({
+        "type": "scored", "id": raw.listing_id,
+        "score": round(scored.total_score, 1), "is_deal": is_deal,
+        "profit_ron": round(scored.estimated_profit_ron) if is_deal else 0,
+    })
+    if is_deal:
+        broadcast_deal({
+            "id": raw.listing_id, "title": raw.title, "url": raw.url,
+            "platform": raw.platform, "category": raw.category,
+            "condition": raw.condition, "location": raw.location,
+            "image": raw.images[0] if raw.images else "",
+            "total_score": scored.total_score, "profit_score": scored.profit_score,
+            "demand_score": scored.demand_score, "confidence_score": scored.confidence_score,
+            "asking_price_ron": price_ron, "estimated_value_ron": final_value_ron,
+            "estimated_profit_ron": scored.estimated_profit_ron,
+            "profit_percent": scored.profit_percent,
+            "ner_entities": ner_entities,
+        })
+    return is_deal
 
 
 async def run_scan(config: dict):
+    if _scan_lock.locked():
+        logger.info("[Agent] Scan already in progress — skipping duplicate request")
+        return 0
+    async with _scan_lock:
+        return await _run_scan(config)
+
+
+async def _run_scan(config: dict):
     pricing_cfg = config.get("pricing", {})
     scoring_cfg = config.get("scoring", {})
     categories = config.get("categories", [])
@@ -357,15 +435,7 @@ async def run_scan(config: dict):
         "gbp_to_ron_rate": pricing_cfg.get("gbp_to_ron_rate", 5.75),
     }
 
-    ebay_cfg = markets.get("ebay", {})
-    ebay_pricer = EbaySoldPricer(
-        config={
-            "country_tld": ebay_cfg.get("country_tld", "com"),
-            "ebay_sold_lookback_days": pricing_cfg.get("ebay_sold_lookback_days", 90),
-        },
-        usd_to_ron=pricing_cfg.get("usd_to_ron_rate", 4.55),
-        eur_to_ron=pricing_cfg.get("eur_to_ron_rate", 4.97),
-    )
+    # eBay sold endpoint returns 403 — skipping. Demand is derived from OLX market depth.
 
     llm_estimator: Optional[LLMPriceEstimator] = None
     if pricing_cfg.get("llm_fallback_enabled", True):
@@ -375,35 +445,55 @@ async def run_scan(config: dict):
                 usd_to_ron=pricing_cfg.get("usd_to_ron_rate", 4.55),
             )
         except Exception as e:
-            print(f"[Agent] LLM estimator unavailable: {e}")
+            logger.info(f"[Agent] LLM estimator unavailable: {e}")
 
     emag_pricer = EmagPricer()
+    olx_pricer = OLXPricer(pages=1)
+    # Facebook used-market pricer (disabled gracefully when no cookies)
+    fb_pricer: Optional[FacebookPricer] = None
+    _fb_market = markets.get("facebook", {})
+    if _fb_market.get("enabled", False):
+        fb_pricer = FacebookPricer(_fb_market)
     scorer = DealScorer(scoring_cfg)
     active_categories = [c for c in categories if c.get("enabled", True)]
 
-    # Collect all listings from enabled markets
-    all_listings: list[RawListing] = []
+    # Signal scan started immediately so the pipeline UI opens right away.
+    # total=0 here — updated below once scraping is done.
+    broadcast_pipeline({"type": "scan_start", "total": 0})
 
-    if markets.get("olx", {}).get("enabled", True):
-        # Try MCP-based scraper first; fall back to HTTP scraper if npx unavailable
+    all_listings: list[RawListing] = []
+    olx_listings_all: list[RawListing] = []
+    fb_listings_all: list[RawListing] = []
+
+    async def _scrape_olx() -> list[RawListing]:
+        if not markets.get("olx", {}).get("enabled", True):
+            return []
+        broadcast_pipeline({"type": "scraping", "platform": "olx",
+                            "msg": f"Scraping OLX ({len(active_categories)} categories)..."})
         olx_listings: list[RawListing] = []
-        try:
-            olx_mcp = OLXMCPScraper(markets["olx"])
-            olx_listings = await olx_mcp.scrape_all_keywords(active_categories)
-            await olx_mcp.close()
-        except Exception as e:
-            print(f"[Agent] OLX-MCP unavailable ({e}), falling back to HTTP scraper")
+        if markets["olx"].get("use_mcp", True):
+            try:
+                olx_mcp = OLXMCPScraper(markets["olx"])
+                olx_listings = await olx_mcp.scrape_all_keywords(active_categories)
+                await olx_mcp.close()
+            except Exception as e:
+                logger.info(f"[Agent] OLX-MCP unavailable ({e}), falling back to HTTP scraper")
+        if not olx_listings:
             olx = OLXScraper(markets["olx"])
             try:
                 olx_listings = await olx.scrape_all_keywords(active_categories)
             finally:
                 await olx.close()
-        all_listings.extend(olx_listings)
-        print(f"[Agent] OLX: {len(olx_listings)} listings found")
+        logger.info(f"[Agent] OLX: {len(olx_listings)} listings found")
+        return olx_listings
 
-    if markets.get("facebook", {}).get("enabled", False):
-        fb_listings: list[RawListing] = []
+    async def _scrape_fb() -> list[RawListing]:
+        if not markets.get("facebook", {}).get("enabled", False):
+            return []
         fb_cfg = markets["facebook"]
+        broadcast_pipeline({"type": "scraping", "platform": "facebook",
+                            "msg": "Scraping Facebook Marketplace..."})
+        fb_listings: list[RawListing] = []
         # Try GraphQL MCP scraper first (macOS, needs Chrome session)
         if fb_cfg.get("mcp_server_path") or fb_cfg.get("use_mcp", False):
             try:
@@ -411,36 +501,63 @@ async def run_scan(config: dict):
                 fb_listings = await fb_mcp.scrape_all_keywords(active_categories)
                 await fb_mcp.close()
             except Exception as e:
-                print(f"[Agent] FB-MCP unavailable ({e}), falling back to Playwright")
+                logger.info(f"[Agent] FB-MCP unavailable ({e}), falling back to Playwright")
         if not fb_listings:
             fb = FacebookMarketplaceScraper(fb_cfg)
             try:
                 fb_listings = await fb.scrape_all_keywords(active_categories)
             finally:
                 await fb.close()
-        all_listings.extend(fb_listings)
-        print(f"[Agent] Facebook: {len(fb_listings)} listings found")
+        logger.info(f"[Agent] Facebook: {len(fb_listings)} listings found")
+        return fb_listings
 
-    print(f"[Agent] Total listings collected: {len(all_listings)}")
+    # Scrape both marketplaces concurrently \
+    olx_listings_all, fb_listings_all = await asyncio.gather(
+        _scrape_olx(), _scrape_fb(),
+    )
 
-    ebay_cache: dict[str, EbayMarketData] = {}
+    # Round-robin interleave so Facebook results surface alongside OLX
+    # instead of being starved at the tail of a large OLX batch.
+    from itertools import zip_longest
+    _sentinel = object()
+    for o, f in zip_longest(olx_listings_all, fb_listings_all, fillvalue=_sentinel):
+        if o is not _sentinel:
+            all_listings.append(o)
+        if f is not _sentinel:
+            all_listings.append(f)
+
+    total = len(all_listings)
+    logger.info(f"[Agent] Total listings collected: {total}")
+    broadcast_pipeline({"type": "scan_start", "total": total})
+
     emag_cache: dict[str, EmagMarketData] = {}
+    olx_cache: dict[str, OLXMarketData] = {}
+    fb_cache: dict[str, FBMarketData] = {}
     good_deals = 0
-    for raw in all_listings:
+    for i, raw in enumerate(all_listings):
+        broadcast_pipeline({
+            "type": "listing", "idx": i + 1, "total": total,
+            "id": raw.listing_id, "title": raw.title[:70],
+            "platform": raw.platform, "price": raw.price, "currency": raw.currency,
+        })
         try:
             is_deal = await process_listing(
-                raw, ebay_pricer, emag_pricer, llm_estimator, scorer,
+                raw, emag_pricer, olx_pricer, fb_pricer, llm_estimator, scorer,
                 pricing_cfg, scoring_cfg, price_config,
-                ebay_cache=ebay_cache,
-                emag_cache=emag_cache,
+                emag_cache=emag_cache, olx_cache=olx_cache, fb_cache=fb_cache,
             )
             if is_deal:
                 good_deals += 1
         except Exception as e:
-            print(f"[Agent] Error processing '{raw.title}': {e}")
+            logger.info(f"[Agent] Error processing '{raw.title[:50]}': {e}")
+            broadcast_pipeline({"type": "scored", "id": raw.listing_id, "score": 0, "is_deal": False, "error": True})
 
     await emag_pricer.close()
-    print(f"[Agent] Scan complete. Good deals found: {good_deals}/{len(all_listings)}")
+    await olx_pricer.close()
+    if fb_pricer is not None:
+        await fb_pricer.close()
+    broadcast_pipeline({"type": "scan_done", "deals": good_deals, "total": total})
+    logger.info(f"[Agent] Scan complete. Good deals found: {good_deals}/{total}")
     return good_deals
 
 
@@ -449,15 +566,15 @@ async def start_agent(config_path: str = "config/settings.yaml"):
     config = load_config(config_path)
     await init_db()
     _running = True
-    print("[Agent] Starting market watch agent...")
+    logger.info("[Agent] Starting market watch agent...")
 
     while _running:
         try:
             await run_scan(config)
         except Exception as e:
-            print(f"[Agent] Scan error: {e}")
+            logger.info(f"[Agent] Scan error: {e}")
         interval = config.get("markets", {}).get("olx", {}).get("scan_interval_minutes", 30)
-        print(f"[Agent] Next scan in {interval} minutes...")
+        logger.info(f"[Agent] Next scan in {interval} minutes...")
         await asyncio.sleep(interval * 60)
 
 

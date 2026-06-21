@@ -9,6 +9,9 @@ No external deps needed at this scale (2-3k titles).
 For >50k titles, swap in the datasketch library.
 """
 from __future__ import annotations
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _shingles(text: str, n: int = 3) -> frozenset[str]:
@@ -56,11 +59,11 @@ class Deduper:
         _buckets: dict[str, list[int]] = {}
 
         n_in = len(items)
-        print(f"[Deduper] Deduplicating {n_in} titles (threshold={self.threshold})…", flush=True)
+        logger.info(f"[Deduper] Deduplicating {n_in} titles (threshold={self.threshold})…")
 
         for idx, item in enumerate(items):
             if idx % 500 == 0 and idx > 0:
-                print(f"[Deduper]   {idx}/{n_in} processed, {len(self._kept)} unique so far…", flush=True)
+                logger.info(f"[Deduper]   {idx}/{n_in} processed, {len(self._kept)} unique so far…")
 
             raw = item.get("raw", "")
             prefix = raw.lower()[:6]
@@ -82,7 +85,7 @@ class Deduper:
                 _buckets.setdefault(prefix, []).append(new_idx)
 
         n_out = len(self._kept)
-        print(f"[Deduper] Done: {n_in} → {n_out} unique ({n_in - n_out} near-duplicates removed)", flush=True)
+        logger.info(f"[Deduper] Done: {n_in} → {n_out} unique ({n_in - n_out} near-duplicates removed)")
         return list(self._kept)
 
     def cluster_size(self, representative_id: str) -> int:

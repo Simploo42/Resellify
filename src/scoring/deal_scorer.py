@@ -108,15 +108,21 @@ class DealScorer:
             notes.append(f"No profit or overpriced (margin: {profit_percent:.0f}%)")
 
         # ── Demand Score ───────────────────────────────────────────────────────
-        # demand_score comes from EbaySoldPricer and is already 0-100
-        if demand_score >= 80:
-            notes.append(f"High demand ({recent_sold_30d} sold last 30d)")
-        elif demand_score >= 50:
-            notes.append(f"Moderate demand ({recent_sold_30d} sold last 30d)")
-        elif demand_score >= 25:
-            notes.append(f"Low demand ({sold_count} sold in window)")
+        # demand_score may come from OLX market depth (sold_count = active listings)
+        # or eBay sold data (recent_sold_30d = actual sales). Detect which.
+        _market_label = (
+            f"{recent_sold_30d} sold last 30d" if recent_sold_30d > 0
+            else f"{sold_count} similar OLX listings" if sold_count > 0
+            else "no market data"
+        )
+        if demand_score >= 70:
+            notes.append(f"High market presence ({_market_label})")
+        elif demand_score >= 40:
+            notes.append(f"Moderate market presence ({_market_label})")
+        elif demand_score >= 15:
+            notes.append(f"Low market presence ({_market_label})")
         else:
-            notes.append("Very low/unknown demand — harder to resell")
+            notes.append("Very thin market — verify demand before buying")
 
         # ── Confidence Score ───────────────────────────────────────────────────
         confidence_score = confidence * 100

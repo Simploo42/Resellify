@@ -14,6 +14,10 @@ facebook_cookies.json
 *.db
 resellify.db
 
+# Logs
+server.log
+*.log
+
 # Playwright
 playwright-report/
 .cache/

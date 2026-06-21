@@ -24,6 +24,14 @@
     .grade-B { background: #eab308; }
     .grade-C { background: #f97316; }
     .grade-D { background: #ef4444; }
+    body { padding-bottom: 2.5rem; }
+    #log-drawer.open { height: 14rem; }
+    #log-drawer { transition: height 0.2s ease; }
+    #log-lines { font-family: ui-monospace, monospace; }
+    @keyframes fadeSlideIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
   </style>
 </head>
 <body class="h-full text-gray-100 font-sans">
@@ -52,18 +60,19 @@
           </div>
         </div>
 
-        <!-- Agent status + controls -->
-        <div x-data="agentControl()" class="flex items-center gap-3">
-          <div class="flex items-center gap-1.5 text-xs">
-            <div :class="running ? 'bg-green-500 animate-pulse' : 'bg-gray-600'" class="w-2 h-2 rounded-full"></div>
-            <span x-text="running ? 'Agent running' : 'Agent stopped'" class="text-gray-400"></span>
-          </div>
-          <button @click="toggleAgent()" :class="running ? 'bg-red-700 hover:bg-red-600' : 'bg-indigo-600 hover:bg-indigo-500'"
-            class="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors">
-            <span x-text="running ? 'Stop' : 'Start'"></span>
-          </button>
-          <button @click="scanNow()" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-700 hover:bg-gray-600 transition-colors">
-            Scan now
+        <!-- Single scan button -->
+        <div x-data="agentControl()" class="flex items-center gap-2">
+          <span x-show="scanning" x-cloak class="text-xs text-gray-400 font-mono"
+                x-text="`${scanIdx}/${scanTotal}`"></span>
+          <button @click="action()"
+            :disabled="scanning"
+            :class="{
+              'bg-indigo-600 hover:bg-indigo-500': !running && !scanning,
+              'bg-red-700 hover:bg-red-600': running && !scanning,
+              'bg-gray-700 cursor-not-allowed': scanning
+            }"
+            class="px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5">
+            <span x-text="scanning ? '⏳ Scanning…' : running ? '■ Stop' : '▶ Start'"></span>
           </button>
         </div>
       </div>
@@ -75,21 +84,120 @@
     {% block content %}{% endblock %}
   </main>
 
+  <!-- Live log drawer -->
+  <div id="log-drawer"
+       style="height:2.4rem; overflow:hidden;"
+       class="fixed bottom-0 inset-x-0 z-50 bg-gray-950 border-t border-gray-800 flex flex-col">
+    <!-- Header bar -->
+    <div id="log-header"
+         class="flex items-center justify-between px-4 h-9 cursor-pointer select-none shrink-0"
+         onclick="logPanel.toggle()">
+      <div class="flex items-center gap-2">
+        <span id="log-dot" class="w-2 h-2 rounded-full bg-gray-600"></span>
+        <span class="text-xs font-mono text-gray-400">Logs</span>
+        <span id="log-count" class="text-xs text-gray-600"></span>
+      </div>
+      <div class="flex items-center gap-3">
+        <button onclick="event.stopPropagation(); logPanel.clear()"
+                class="text-xs text-gray-600 hover:text-gray-400 transition-colors">clear</button>
+        <span id="log-chevron" class="text-gray-600 text-xs">▲</span>
+      </div>
+    </div>
+    <!-- Log lines -->
+    <div id="log-lines"
+         class="flex-1 overflow-y-auto px-4 pb-2 space-y-0.5 text-xs leading-5">
+    </div>
+  </div>
+
   <script>
     function agentControl() {
       return {
         running: {{ 'true' if agent_running is defined and agent_running else 'false' }},
-        async toggleAgent() {
-          const endpoint = this.running ? '/api/agent/stop' : '/api/agent/start';
-          await fetch(endpoint, { method: 'POST' });
-          const status = await fetch('/api/agent/status').then(r => r.json());
-          this.running = status.running;
+        scanning: false,
+        scanIdx: 0,
+        scanTotal: 0,
+
+        init() {
+          // Track scan state via pipeline SSE
+          const es = new EventSource('/api/pipeline/stream');
+          es.onmessage = ev => {
+            try {
+              const d = JSON.parse(ev.data);
+              if (d.type === 'scan_start') { this.scanning = true; this.scanIdx = 0; this.scanTotal = d.total; }
+              if (d.type === 'listing')    { this.scanIdx = d.idx; this.scanTotal = d.total; }
+              if (d.type === 'scan_done')  { this.scanning = false; this.scanIdx = 0; }
+            } catch(_) {}
+          };
+          es.onerror = () => es.close();
         },
-        async scanNow() {
-          await fetch('/api/agent/scan-now', { method: 'POST' });
-        }
+
+        async action() {
+          if (this.running) {
+            await fetch('/api/agent/stop', { method: 'POST' });
+            this.running = false;
+          } else {
+            await fetch('/api/agent/start', { method: 'POST' });
+            this.running = true;
+          }
+        },
       }
     }
+
+    const COLOR = {
+      gray:   'text-gray-500',
+      slate:  'text-gray-300',
+      yellow: 'text-yellow-400',
+      red:    'text-red-400',
+    };
+
+    const logPanel = (() => {
+      const drawer  = document.getElementById('log-drawer');
+      const lines   = document.getElementById('log-lines');
+      const dot     = document.getElementById('log-dot');
+      const countEl = document.getElementById('log-count');
+      const chevron = document.getElementById('log-chevron');
+      let open = false;
+      let count = 0;
+
+      function appendEntry(e) {
+        count++;
+        countEl.textContent = `(${count})`;
+        const div = document.createElement('div');
+        div.className = `${COLOR[e.color] || COLOR.slate} whitespace-pre-wrap break-all`;
+        div.textContent = `${e.ts} ${e.level.padEnd(7)} ${e.msg}`;
+        lines.appendChild(div);
+        if (lines.children.length > 500) lines.firstChild.remove();
+        if (open) lines.scrollTop = lines.scrollHeight;
+        // pulse dot
+        dot.className = 'w-2 h-2 rounded-full bg-green-400';
+        setTimeout(() => { dot.className = 'w-2 h-2 rounded-full bg-gray-600'; }, 400);
+      }
+
+      function toggle() {
+        open = !open;
+        drawer.style.height = open ? '14rem' : '2.4rem';
+        chevron.textContent = open ? '▼' : '▲';
+        if (open) lines.scrollTop = lines.scrollHeight;
+      }
+
+      function clear() { lines.innerHTML = ''; count = 0; countEl.textContent = ''; }
+
+      // SSE connection with auto-reconnect
+      function connect() {
+        const es = new EventSource('/api/logs/stream');
+        es.onmessage = ev => {
+          try { appendEntry(JSON.parse(ev.data)); } catch (_) {}
+        };
+        es.onerror = () => {
+          es.close();
+          setTimeout(connect, 3000);
+        };
+      }
+      connect();
+
+      return { toggle, clear };
+    })();
   </script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

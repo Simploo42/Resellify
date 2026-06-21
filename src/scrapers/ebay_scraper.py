@@ -1,8 +1,11 @@
 import re
+import logging
 import httpx
 from datetime import datetime
 from bs4 import BeautifulSoup
 from .base import BaseScraper, RawListing
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_ebay_price(text: str) -> tuple[float, str]:
@@ -66,7 +69,7 @@ class EbayScraper(BaseScraper):
                     if page_num < self.max_pages:
                         await self._random_delay(1.5)
                 except Exception as e:
-                    print(f"[eBay] Error page {page_num} for '{keyword}': {e}")
+                    logger.info(f"[eBay] Error page {page_num} for '{keyword}': {e}")
                     break
 
         return listings
@@ -123,7 +126,7 @@ class EbayScraper(BaseScraper):
                     matched_keyword=keyword,
                 ))
             except Exception as e:
-                print(f"[eBay] Error parsing item: {e}")
+                logger.info(f"[eBay] Error parsing item: {e}")
 
         return listings
 
@@ -145,5 +148,5 @@ class EbayScraper(BaseScraper):
 
                 return detail
             except Exception as e:
-                print(f"[eBay] Error fetching detail {url}: {e}")
+                logger.info(f"[eBay] Error fetching detail {url}: {e}")
                 return {}

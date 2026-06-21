@@ -8,11 +8,14 @@ Prerequisites:
 """
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime
 from typing import Optional, Any
 
 from .base import BaseScraper, RawListing
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_price(text: str) -> tuple[float, str]:
@@ -194,7 +197,7 @@ class OLXMCPScraper(BaseScraper):
                 if page < self.max_pages:
                     await self._random_delay()
             except Exception as e:
-                print(f"[OLX-MCP] Error searching '{keyword}' page {page}: {e}")
+                logger.info(f"[OLX-MCP] Error searching '{keyword}' page {page}: {e}")
                 break
 
         return listings
@@ -216,7 +219,7 @@ class OLXMCPScraper(BaseScraper):
                 if listing:
                     listings.append(listing)
             except Exception as e:
-                print(f"[OLX-MCP] Error parsing item: {e}")
+                logger.info(f"[OLX-MCP] Error parsing item: {e}")
 
         return listings
 
@@ -305,5 +308,5 @@ class OLXMCPScraper(BaseScraper):
             if isinstance(result, dict):
                 return result
         except Exception as e:
-            print(f"[OLX-MCP] Error getting details for {url}: {e}")
+            logger.info(f"[OLX-MCP] Error getting details for {url}: {e}")
         return {}

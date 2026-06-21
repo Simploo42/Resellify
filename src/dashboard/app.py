@@ -1,8 +1,11 @@
 import asyncio
+import collections
 import json
+import logging
 import os
 import tempfile
 import threading
+import time
 import yaml
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +26,60 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 app = FastAPI(title="Resellify", description="Market resell opportunity finder")
+
+# ── Live log capture ───────────────────────────────────────────────────────
+
+_log_buffer: collections.deque = collections.deque(maxlen=500)
+_log_subscribers: set[asyncio.Queue] = set()
+
+
+class _LiveLogHandler(logging.Handler):
+    """Captures log records into the in-memory buffer and fans out to SSE subscribers."""
+
+    LEVEL_COLOR = {
+        "DEBUG": "gray",
+        "INFO": "slate",
+        "WARNING": "yellow",
+        "ERROR": "red",
+        "CRITICAL": "red",
+    }
+
+    _SUPPRESS = frozenset([
+        "pipe closed by peer or os.write(pipe, data) raised exception",
+    ])
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if any(s in msg for s in self._SUPPRESS):
+            return
+        entry = {
+            "ts": datetime.utcnow().strftime("%H:%M:%S"),
+            "level": record.levelname,
+            "color": self.LEVEL_COLOR.get(record.levelname, "slate"),
+            "msg": self.format(record),
+        }
+        _log_buffer.append(entry)
+        dead: set[asyncio.Queue] = set()
+        for q in list(_log_subscribers):
+            try:
+                q.put_nowait(entry)
+            except asyncio.QueueFull:
+                dead.add(q)
+        _log_subscribers.difference_update(dead)
+
+
+def _install_log_handler() -> None:
+    handler = _LiveLogHandler()
+    handler.setFormatter(logging.Formatter("%(name)s — %(message)s"))
+    handler.setLevel(logging.DEBUG)
+    for name in ("", "uvicorn", "uvicorn.access", "uvicorn.error", "src"):
+        lg = logging.getLogger(name)
+        lg.addHandler(handler)
+        if lg.level == logging.NOTSET or lg.level > logging.INFO:
+            lg.setLevel(logging.INFO)
+
+
+_install_log_handler()
 
 _agent_task: Optional[asyncio.Task] = None
 CONFIG_PATH = "config/settings.yaml"
@@ -109,6 +166,8 @@ class RejectBody(BaseModel):
 @app.on_event("startup")
 async def startup():
     await init_db()
+    # Re-attach after uvicorn has set up its own logging
+    _install_log_handler()
 
 
 def _grade_color(grade: str) -> str:
@@ -164,6 +223,127 @@ async def api_agent_status():
     running = bool(_agent_task and not _agent_task.done())
     return JSONResponse({"running": running})
 
+
+
+@app.delete("/api/deals/clear-all")
+async def clear_all_deals(db: AsyncSession = Depends(get_db)):
+    """Wipe all deals, scores, price estimates, and listings from the DB."""
+    await db.execute(delete(DealScore))
+    await db.execute(delete(PriceEstimate))
+    await db.execute(delete(ScanLog))
+    await db.execute(delete(Listing))
+    await db.commit()
+    return JSONResponse({"status": "cleared"})
+
+# ── API: Live logs ─────────────────────────────────────────────────────────
+
+@app.get("/api/logs/recent")
+async def api_logs_recent():
+    return JSONResponse(list(_log_buffer)[-200:])
+
+
+@app.get("/api/logs/stream")
+async def api_logs_stream(request: Request):
+    from fastapi.responses import StreamingResponse
+    q: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _log_subscribers.add(q)
+
+    async def event_gen():
+        try:
+            # Send backlog on connect
+            for entry in list(_log_buffer)[-50:]:
+                yield f"data: {json.dumps(entry)}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    entry = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {json.dumps(entry)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"  # keep-alive
+        finally:
+            _log_subscribers.discard(q)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── API: Live deals stream ──────────────────────────────────────────────────
+
+@app.get("/api/deals/stream")
+async def api_deals_stream(request: Request):
+    from fastapi.responses import StreamingResponse
+    from ..events import _deal_buffer, _deal_subscribers
+    q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _deal_subscribers.add(q)
+
+    async def event_gen():
+        try:
+            for deal in list(_deal_buffer):
+                yield f"data: {json.dumps(deal)}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    deal = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {json.dumps(deal)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            _deal_subscribers.discard(q)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+
+@app.get("/api/scan/status")
+async def api_scan_status():
+    from ..agent import _scan_lock
+    return JSONResponse({"scanning": _scan_lock.locked()})
+
+
+@app.get("/api/pipeline/stream")
+async def api_pipeline_stream(request: Request):
+    from fastapi.responses import StreamingResponse
+    from ..events import _pipeline_buffer, _pipeline_subscribers, _scan_state
+    q: asyncio.Queue = asyncio.Queue(maxsize=500)
+    _pipeline_subscribers.add(q)
+
+    async def event_gen():
+        try:
+            # Send sticky scan state first — survives buffer eviction
+            if _scan_state:
+                yield f"data: {json.dumps(_scan_state)}\n\n"
+            # Replay buffer, skipping scan_start (already sent above)
+            for ev in list(_pipeline_buffer):
+                if ev.get("type") != "scan_start":
+                    yield f"data: {json.dumps(ev)}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {json.dumps(ev)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            _pipeline_subscribers.discard(q)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 # ── Dashboard: Main ────────────────────────────────────────────────────────
 
@@ -248,8 +428,7 @@ async def dashboard(
 
     agent_running = bool(_agent_task and not _agent_task.done())
 
-    return templates.TemplateResponse("index.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "index.html", {
         "deals": deals,
         "stats": stats,
         "recent_scans": recent_scans,
@@ -286,8 +465,7 @@ async def deal_detail(request: Request, listing_id: str, db: AsyncSession = Depe
     )
     estimates = estimates_result.scalars().all()
 
-    return templates.TemplateResponse("deal_detail.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "deal_detail.html", {
         "listing": listing,
         "deal_score": deal_score,
         "estimates": estimates,
@@ -298,8 +476,7 @@ async def deal_detail(request: Request, listing_id: str, db: AsyncSession = Depe
 async def config_page(request: Request):
     with open(CONFIG_PATH) as f:
         config_text = f.read()
-    return templates.TemplateResponse("config.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "config.html", {
         "config_text": config_text,
     })
 
@@ -393,8 +570,7 @@ async def spot_check_page(request: Request, skip: str = ""):
         "total": total,
         "remaining": remaining,
     }
-    return templates.TemplateResponse("spot_check.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "spot_check.html", {
         "record": record,
         "progress": progress,
     })

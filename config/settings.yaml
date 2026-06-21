@@ -6,16 +6,17 @@
 markets:
   olx:
     enabled: true
+    use_mcp: false   # olx-mcp requires Playwright/Chromium; use HTTP scraper on Android
     base_url: "https://www.olx.ro"
     # Leave blank for all Romania, or set to: bucuresti, cluj-napoca, timisoara, etc.
     location: "bucuresti"
     scan_interval_minutes: 30
-    max_pages_per_keyword: 3
+    max_pages_per_keyword: 1
     # Delay between requests in seconds (respect rate limits)
-    request_delay_seconds: 2.5
+    request_delay_seconds: 1.0
 
   facebook:
-    enabled: false
+    enabled: true
     # --- Option A: MCP server (GraphQL, no browser automation, macOS-primary) ---
     # https://github.com/jdcodes1/facebook-marketplace-mcp
     # Set use_mcp: true and mcp_server_path to your built dist/index.js

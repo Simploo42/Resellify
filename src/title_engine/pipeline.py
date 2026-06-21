@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import json
 import os
 from dataclasses import asdict
@@ -26,6 +27,8 @@ from .labeler import HaikuLabeler, LabelRecord, CONFIDENCE_FLOOR
 from .cross_checker import prefill, cross_check
 from .tokenizer import tokenize
 from .validator import validate, Disposition
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = Path("data/title_engine")
 
@@ -46,7 +49,7 @@ def write_jsonl(records: list[LabelRecord], path: Path):
     with open(path, "w") as f:
         for r in records:
             f.write(r.to_jsonl() + "\n")
-    print(f"[Pipeline] Wrote {len(records)} records → {path}")
+    logger.info(f"[Pipeline] Wrote {len(records)} records → {path}")
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -71,11 +74,11 @@ class TitleEnginePipeline:
         Returns a stats dict.
         """
         start = datetime.utcnow()
-        print(f"[Pipeline] Starting. Input: {len(raw_titles)} titles")
+        logger.info(f"[Pipeline] Starting. Input: {len(raw_titles)} titles")
 
         # ── Step 1: dedup ──────────────────────────────────────────────────────
         unique = self.deduper.deduplicate(raw_titles)
-        print(f"[Pipeline] After dedup: {len(unique)} unique titles")
+        logger.info(f"[Pipeline] After dedup: {len(unique)} unique titles")
 
         # ── Step 2: prefill spans from regex + gazetteer ───────────────────────
         for item in unique:
@@ -83,9 +86,9 @@ class TitleEnginePipeline:
             item["prefilled_tags"] = prefill(tokens)
 
         # ── Step 3: label with Haiku ───────────────────────────────────────────
-        print(f"[Pipeline] Labeling {len(unique)} titles with {self.labeler._model}…")
+        logger.info(f"[Pipeline] Labeling {len(unique)} titles with {self.labeler._model}…")
         records = await self.labeler.label_titles(unique)
-        print(f"[Pipeline] Labeling done. {len(records)} records received.")
+        logger.info(f"[Pipeline] Labeling done. {len(records)} records received.")
 
         # ── Step 4: validate + cross-check ────────────────────────────────────
         train_set: list[LabelRecord] = []
@@ -96,7 +99,7 @@ class TitleEnginePipeline:
             val = validate(record, confidence_floor=self.confidence_floor)
 
             if val.disposition == Disposition.REJECT:
-                print(f"[Pipeline] REJECT {record.id}: {'; '.join(val.issues)}")
+                logger.info(f"[Pipeline] REJECT {record.id}: {'; '.join(val.issues)}")
                 rejected.append(record)
                 continue
 
@@ -104,7 +107,7 @@ class TitleEnginePipeline:
             cc_issues = cross_check(record.tokens, record.tags)
             if cc_issues:
                 for issue in cc_issues:
-                    print(f"[Pipeline] CROSS-CHECK {record.id}: {issue}")
+                    logger.info(f"[Pipeline] CROSS-CHECK {record.id}: {issue}")
                 record.needs_review = True
                 if val.disposition == Disposition.TRAIN:
                     val.issues.extend(cc_issues)
@@ -132,7 +135,7 @@ class TitleEnginePipeline:
             "rejected": len(rejected),
             "elapsed_seconds": round(elapsed, 1),
         }
-        print(f"[Pipeline] Done in {elapsed:.1f}s: {stats}")
+        logger.info(f"[Pipeline] Done in {elapsed:.1f}s: {stats}")
         return stats
 
 
@@ -154,7 +157,7 @@ async def _main():
 
     if args.input:
         raw_titles = load_jsonl(args.input)
-        print(f"[Pipeline] Loaded {len(raw_titles)} titles from {args.input}")
+        logger.info(f"[Pipeline] Loaded {len(raw_titles)} titles from {args.input}")
 
     elif args.from_db:
         from sqlalchemy import select
@@ -168,10 +171,10 @@ async def _main():
             )
             rows = result.all()
         raw_titles = [{"id": r[0], "raw": r[1]} for r in rows if r[1]]
-        print(f"[Pipeline] Loaded {len(raw_titles)} titles from DB")
+        logger.info(f"[Pipeline] Loaded {len(raw_titles)} titles from DB")
 
     if not raw_titles:
-        print("[Pipeline] No titles to process.")
+        logger.info("[Pipeline] No titles to process.")
         return
 
     raw_titles = raw_titles[:args.limit]

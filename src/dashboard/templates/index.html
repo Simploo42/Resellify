@@ -82,12 +82,89 @@
     Showing <span class="text-white font-medium">{{ deals|length }}</span> of
     <span class="text-white font-medium">{{ pagination.total }}</span> deals
   </p>
-  <p class="text-xs text-gray-600">Page {{ pagination.page }} / {{ pagination.total_pages }}</p>
+  <div class="flex items-center gap-3">
+    <p class="text-xs text-gray-600">Page {{ pagination.page }} / {{ pagination.total_pages }}</p>
+    {% if pagination.total > 0 %}
+    <button
+      onclick="if(confirm('Delete all saved deals and listings from the database?')) { fetch('/api/deals/clear-all', {method:'DELETE'}).then(()=>location.reload()) }"
+      class="text-xs px-2.5 py-1 rounded-lg bg-red-900/50 hover:bg-red-800 text-red-400 hover:text-red-300 transition-colors border border-red-900">
+      Clear all deals
+    </button>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Pipeline panel -->
+<div id="pipeline-panel"
+     x-data="pipelinePanel()"
+     x-init="init()"
+     class="bg-gray-900 border border-gray-800 rounded-xl mb-5 overflow-hidden">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between px-4 py-2.5 cursor-pointer select-none"
+       @click="open = !open">
+    <div class="flex items-center gap-3">
+      <span class="text-sm font-medium text-gray-300">Pipeline</span>
+      <template x-if="scanning">
+        <div class="flex items-center gap-2">
+          <div class="w-24 bg-gray-800 rounded-full h-1.5">
+            <div class="bg-indigo-500 h-1.5 rounded-full transition-all"
+                 :style="`width:${scanTotal ? Math.round(scanIdx/scanTotal*100) : 0}%`"></div>
+          </div>
+          <span class="text-xs text-gray-400 font-mono" x-text="`${scanIdx} / ${scanTotal}`"></span>
+          <span class="text-xs text-emerald-400 font-mono" x-text="`${deals} deals`"></span>
+        </div>
+      </template>
+      <template x-if="!scanning && lastScanDeals !== null">
+        <span class="text-xs text-gray-500" x-text="`Last scan: ${lastScanDeals} deals from ${lastScanTotal}`"></span>
+      </template>
+    </div>
+    <div class="flex items-center gap-3">
+      <button @click.stop="triggerScan()"
+              :disabled="scanning"
+              :class="scanning ? 'text-gray-600 cursor-not-allowed' : 'text-indigo-400 hover:text-indigo-300'"
+              class="text-xs transition-colors">⟳ Scan now</button>
+      <span class="text-gray-600 text-xs" x-text="open ? '▲' : '▼'"></span>
+    </div>
+  </div>
+
+  <!-- Rows -->
+  <div x-show="open" x-cloak class="border-t border-gray-800 divide-y divide-gray-800/60 max-h-72 overflow-y-auto">
+    <template x-if="items.length === 0">
+      <div class="px-4 py-6 text-center text-xs text-gray-600">No listings processed yet — start a scan.</div>
+    </template>
+    <template x-for="item in items" :key="item.id">
+      <div class="flex items-center gap-3 px-4 py-2 text-xs hover:bg-gray-800/40 transition-colors">
+        <!-- Platform -->
+        <span class="w-10 text-center px-1 py-0.5 rounded font-mono shrink-0"
+              :class="{
+                'bg-blue-900 text-blue-300':    item.platform === 'olx',
+                'bg-indigo-900 text-indigo-300': item.platform === 'facebook',
+                'bg-amber-900 text-amber-300':   item.platform !== 'olx' && item.platform !== 'facebook',
+              }"
+              x-text="item.platform.toUpperCase()"></span>
+        <!-- Title -->
+        <span class="flex-1 min-w-0 truncate text-gray-300" x-text="item.title"></span>
+        <!-- Price -->
+        <span class="shrink-0 text-gray-500 font-mono w-20 text-right"
+              x-text="`${Math.round(item.price)} ${item.currency}`"></span>
+        <!-- Status -->
+        <span class="shrink-0 w-24 text-right font-medium"
+              :class="{
+                'text-yellow-500': item.status === 'pricing',
+                'text-emerald-400': item.status === 'deal',
+                'text-gray-500':   item.status === 'skip',
+                'text-red-500':    item.status === 'error',
+              }"
+              x-text="item.statusLabel"></span>
+      </div>
+    </template>
+  </div>
 </div>
 
 <!-- Deals grid -->
+<div id="deals-grid" class="space-y-3">
 {% if deals %}
-<div class="space-y-3">
   {% for item in deals %}
   {% set listing = item.listing %}
   {% set score = item.score %}
@@ -135,6 +212,22 @@
               <span class="text-xs text-gray-500">• {{ listing.location }}</span>
               {% endif %}
             </div>
+            {% if listing.ner_entities %}
+            <div class="flex flex-wrap gap-1 mt-1">
+              {% for label, value in listing.ner_entities.items() %}
+              <span class="text-[10px] px-1.5 py-0.5 rounded-full border
+                {% if label == 'brand' %}border-blue-800 text-blue-400 bg-blue-950
+                {% elif label == 'model' %}border-purple-800 text-purple-400 bg-purple-950
+                {% elif label == 'variant' %}border-indigo-800 text-indigo-400 bg-indigo-950
+                {% elif label == 'condition' %}border-green-800 text-green-400 bg-green-950
+                {% elif label == 'color' %}border-pink-800 text-pink-400 bg-pink-950
+                {% else %}border-gray-700 text-gray-500 bg-gray-900{% endif %}">
+                <span class="opacity-50 uppercase tracking-wide">{{ label }}</span>
+                <span class="ml-0.5 font-medium">{{ value }}</span>
+              </span>
+              {% endfor %}
+            </div>
+            {% endif %}
           </div>
 
           <!-- Score badge -->
@@ -201,7 +294,6 @@
     </div>
   </div>
   {% endfor %}
-</div>
 
 <!-- Pagination -->
 {% if pagination.total_pages > 1 %}
@@ -223,7 +315,7 @@
 {% endif %}
 
 {% else %}
-<div class="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
+<div id="empty-state" class="bg-gray-900 border border-gray-800 rounded-xl p-12 text-center">
   <div class="text-4xl mb-3">🔍</div>
   <div class="text-lg font-medium text-gray-300 mb-1">No deals found yet</div>
   <div class="text-sm text-gray-500 mb-4">Start the agent or trigger a scan to discover resell opportunities.</div>
@@ -233,5 +325,219 @@
   </button>
 </div>
 {% endif %}
+</div><!-- /deals-grid -->
 
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const grid = document.getElementById('deals-grid');
+  const seen = new Set(
+    [...grid.querySelectorAll('[data-deal-id]')].map(el => el.dataset.dealId)
+  );
+
+  function grade(score) {
+    if (score >= 85) return ['S', 'grade-S'];
+    if (score >= 72) return ['A', 'grade-A'];
+    if (score >= 58) return ['B', 'grade-B'];
+    if (score >= 45) return ['C', 'grade-C'];
+    return ['D', 'grade-D'];
+  }
+
+  function platformBadge(p) {
+    if (p === 'olx')      return 'bg-blue-900 text-blue-300';
+    if (p === 'facebook') return 'bg-indigo-900 text-indigo-300';
+    return 'bg-amber-900 text-amber-300';
+  }
+
+  function buildCard(d) {
+    const [gl, gradeClass] = grade(d.total_score);
+    const img = d.image
+      ? `<a href="/deal/${d.id}" class="flex-shrink-0">
+           <img src="${d.image}" alt="" class="w-20 h-20 object-cover rounded-lg bg-gray-800"
+                loading="lazy" onerror="this.style.display='none'" />
+         </a>`
+      : '';
+    const cat  = d.category  ? `<span class="text-xs text-gray-500">${d.category}</span>` : '';
+    const cond = (d.condition && d.condition !== 'unknown')
+      ? `<span class="text-xs text-gray-500">• ${d.condition}</span>` : '';
+    const loc  = d.location  ? `<span class="text-xs text-gray-500">• ${d.location}</span>` : '';
+    const nerColors = { brand: 'border-blue-800 text-blue-400 bg-blue-950', model: 'border-purple-800 text-purple-400 bg-purple-950', variant: 'border-indigo-800 text-indigo-400 bg-indigo-950', condition: 'border-green-800 text-green-400 bg-green-950', color: 'border-pink-800 text-pink-400 bg-pink-950' };
+    const nerHtml = (d.ner_entities && Object.keys(d.ner_entities).length)
+      ? `<div class="flex flex-wrap gap-1 mt-1">${Object.entries(d.ner_entities).map(([k,v]) => `<span class="text-[10px] px-1.5 py-0.5 rounded-full border ${nerColors[k] || 'border-gray-700 text-gray-500 bg-gray-900'}"><span class="opacity-50 uppercase tracking-wide">${k}</span><span class="ml-0.5 font-medium">${v}</span></span>`).join('')}</div>`
+      : '';
+
+    const card = document.createElement('div');
+    card.dataset.dealId = d.id;
+    card.className = 'bg-gray-900 border border-emerald-700 hover:border-gray-700 rounded-xl p-4 transition-colors';
+    card.style.animation = 'fadeSlideIn 0.4s ease';
+    card.innerHTML = `
+      <div class="flex items-start gap-4">
+        ${img}
+        <div class="flex-1 min-w-0">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <a href="/deal/${d.id}" class="font-medium text-white hover:text-indigo-300 transition-colors line-clamp-2 leading-snug">
+                ${d.title}
+              </a>
+              <div class="flex items-center flex-wrap gap-1.5 mt-1.5">
+                <span class="text-xs px-1.5 py-0.5 rounded font-mono ${platformBadge(d.platform)}">${d.platform.toUpperCase()}</span>
+                ${cat}${cond}${loc}
+                <span class="text-xs px-1.5 py-0.5 rounded bg-emerald-900 text-emerald-300 font-medium">NEW</span>
+              </div>
+              ${nerHtml}
+            </div>
+            <div class="flex-shrink-0 text-center">
+              <div class="${gradeClass} w-12 h-12 rounded-xl flex flex-col items-center justify-center">
+                <div class="text-xs font-bold text-white/80 leading-none">${gl}</div>
+                <div class="text-sm font-bold text-white leading-none">${Math.round(d.total_score)}</div>
+              </div>
+            </div>
+          </div>
+          <div class="flex items-center flex-wrap gap-4 mt-3">
+            <div><div class="text-xs text-gray-500">Asking</div>
+              <div class="text-lg font-bold text-white">${Math.round(d.asking_price_ron)} RON</div></div>
+            <div class="text-gray-700">→</div>
+            <div><div class="text-xs text-gray-500">Est. value</div>
+              <div class="text-lg font-semibold text-gray-300">${Math.round(d.estimated_value_ron)} RON</div></div>
+            <div class="ml-auto text-right">
+              <div class="text-xs text-gray-500">Profit</div>
+              <div class="text-xl font-bold text-emerald-400">+${Math.round(d.estimated_profit_ron)} RON</div>
+              <div class="text-xs text-emerald-600">${Math.round(d.profit_percent)}%</div>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 mt-3">
+            <div class="flex items-center gap-1 text-xs text-gray-500">
+              <span>Profit</span>
+              <div class="w-12 bg-gray-800 rounded-full h-1"><div class="bg-emerald-500 h-1 rounded-full" style="width:${Math.round(d.profit_score)}%"></div></div>
+              <span class="text-gray-400">${Math.round(d.profit_score)}</span>
+            </div>
+            <div class="flex items-center gap-1 text-xs text-gray-500">
+              <span>Demand</span>
+              <div class="w-12 bg-gray-800 rounded-full h-1"><div class="bg-blue-500 h-1 rounded-full" style="width:${Math.round(d.demand_score)}%"></div></div>
+              <span class="text-gray-400">${Math.round(d.demand_score)}</span>
+            </div>
+            <div class="flex items-center gap-1 text-xs text-gray-500">
+              <span>Confidence</span>
+              <div class="w-12 bg-gray-800 rounded-full h-1"><div class="bg-purple-500 h-1 rounded-full" style="width:${Math.round(d.confidence_score)}%"></div></div>
+              <span class="text-gray-400">${Math.round(d.confidence_score)}</span>
+            </div>
+            <div class="ml-auto flex items-center gap-2">
+              <a href="${d.url}" target="_blank" rel="noopener" class="text-xs text-indigo-400 hover:text-indigo-300">View listing ↗</a>
+              <a href="/deal/${d.id}" class="text-xs text-gray-500 hover:text-gray-300">Details</a>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    return card;
+  }
+
+  function injectDeal(d) {
+    if (seen.has(d.id)) return;
+    seen.add(d.id);
+    const empty = document.getElementById('empty-state');
+    if (empty) empty.remove();
+    const card = buildCard(d);
+    grid.prepend(card);
+  }
+
+  // SSE stream
+  function connect() {
+    const es = new EventSource('/api/deals/stream');
+    es.onmessage = ev => { try { injectDeal(JSON.parse(ev.data)); } catch(_) {} };
+    es.onerror = () => { es.close(); setTimeout(connect, 4000); };
+  }
+  connect();
+})();
+</script>
+
+<script>
+function pipelinePanel() {
+  return {
+    open: false,
+    scanning: false,
+    scanIdx: 0,
+    scanTotal: 0,
+    deals: 0,
+    lastScanDeals: null,
+    lastScanTotal: 0,
+    items: [],        // {id, title, platform, price, currency, status, statusLabel}
+    _map: new Map(),  // id → index in items
+
+    init() {
+      const es = new EventSource('/api/pipeline/stream');
+      es.onmessage = ev => {
+        try { this.handle(JSON.parse(ev.data)); } catch(_) {}
+      };
+      es.onerror = () => { es.close(); setTimeout(() => this.init(), 4000); };
+    },
+
+    handle(d) {
+      if (d.type === 'scan_start') {
+          this.scanning = true; this.open = true;
+          if (d.total === 0) {
+            // Initial "scraping started" signal — fresh reset
+            this.scanTotal = 0; this.scanIdx = 0; this.deals = 0;
+            this.items = []; this._map = new Map();
+          } else if (d.idx) {
+            // SSE reconnect replay with in-progress state
+            this.scanTotal = d.total; this.scanIdx = d.idx;
+          } else {
+            // Post-scrape: real total received, processing about to start
+            this.scanTotal = d.total; this.scanIdx = 0;
+            // Drop scraping placeholder rows now that real listing rows are incoming
+            this.items = this.items.filter(it => !it.id.startsWith('__scraping_'));
+            this._map = new Map(this.items.map((it, i) => [it.id, i]));
+      }
+      }
+        else if (d.type === 'scraping') {
+          // Placeholder row shown while a platform is being scraped
+          this.scanning = true; this.open = true;
+          const id = `__scraping_${d.platform}`;
+          const item = { id, title: d.msg || `Scraping ${d.platform}...`,
+                          platform: d.platform, price: 0, currency: '',
+                          status: 'pricing', statusLabel: '🔍' };
+          if (this._map.get(id) === undefined) {
+            this.items.unshift(item);
+            if (this.items.length > 150) this.items.pop();
+            this._map = new Map(this.items.map((it, i) => [it.id, i]));
+      }
+      }
+      else if (d.type === 'listing') {
+        this.scanIdx = d.idx; this.scanTotal = d.total;
+        const item = { id: d.id, title: d.title, platform: d.platform,
+                        price: d.price, currency: d.currency,
+                        status: 'pricing', statusLabel: '⏳' };
+        this.items.unshift(item);
+        if (this.items.length > 150) this.items.pop();
+        this._map = new Map(this.items.map((it, i) => [it.id, i]));
+      }
+      else if (d.type === 'scored') {
+        const idx = this._map.get(d.id);
+        if (idx !== undefined) {
+          const it = this.items[idx];
+          if (d.error)       { it.status = 'error'; it.statusLabel = '⚠'; }
+          else if (d.is_deal){ it.status = 'deal';  it.statusLabel = `✅ ${d.score} +${d.profit_ron}RON`; this.deals++; }
+          else               { it.status = 'skip';  it.statusLabel = String(Math.round(d.score)); }
+        } else if (!d.error) {
+          // scored event arrived without a matching listing (buffer replay) — synthesise a row
+          const ghost = { id: d.id, title: d.id, platform: '?', price: 0, currency: '',
+                          status: d.is_deal ? 'deal' : 'skip',
+                          statusLabel: d.is_deal ? `✅ ${d.score} +${d.profit_ron}RON` : String(Math.round(d.score)) };
+          if (d.is_deal) { this.items.unshift(ghost); if (this.items.length > 150) this.items.pop(); this._map = new Map(this.items.map((it,i)=>[it.id,i])); this.deals++; }
+        }
+      }
+      else if (d.type === 'scan_done') {
+        this.scanning = false; this.lastScanDeals = d.deals; this.lastScanTotal = d.total;
+      }
+    },
+
+    async triggerScan() {
+      if (this.scanning) return;
+      await fetch('/api/agent/scan-now', { method: 'POST' });
+    },
+  };
+}
+</script>
 {% endblock %}

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import random
 import tempfile
 from pathlib import Path
@@ -19,6 +20,8 @@ from spacy.tokens import Doc, DocBin, Span
 from spacy.util import filter_spans
 
 from .tokenizer import bio_to_spans, tokenize
+
+logger = logging.getLogger(__name__)
 
 DATA_PATH = Path("data/title_engine/train_v0.jsonl")
 MODEL_DIR = Path("models/title_ner")
@@ -189,7 +192,7 @@ def _make_docbin(records: list[dict]) -> tuple[DocBin, dict[str, int]]:
         db.add(doc)
 
     if skipped:
-        print(f"[Trainer] Skipped {skipped} records with token/tag length mismatch")
+        logger.info(f"[Trainer] Skipped {skipped} records with token/tag length mismatch")
     return db, label_counts
 
 
@@ -198,7 +201,7 @@ def train(data_path: Path, model_dir: Path, seed: int = SEED):
     from spacy.cli.train import train as spacy_train
 
     records = [json.loads(l) for l in data_path.read_text().splitlines() if l.strip()]
-    print(f"[Trainer] Loaded {len(records)} records from {data_path}")
+    logger.info(f"[Trainer] Loaded {len(records)} records from {data_path}")
 
     rng = random.Random(seed)
     indices = list(range(len(records)))
@@ -206,13 +209,13 @@ def train(data_path: Path, model_dir: Path, seed: int = SEED):
     split = int(len(indices) * 0.8)
     train_recs = [records[i] for i in indices[:split]]
     dev_recs = [records[i] for i in indices[split:]]
-    print(f"[Trainer] Split: {len(train_recs)} train / {len(dev_recs)} dev")
+    logger.info(f"[Trainer] Split: {len(train_recs)} train / {len(dev_recs)} dev")
 
     # Warn on low-count labels
     _, all_counts = _make_docbin(records)
     for label, count in sorted(all_counts.items()):
         if count < 50:
-            print(f"[Trainer] WARNING: label {label!r} has only {count} examples — F1 may be unreliable")
+            logger.info(f"[Trainer] WARNING: label {label!r} has only {count} examples — F1 may be unreliable")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -230,10 +233,10 @@ def train(data_path: Path, model_dir: Path, seed: int = SEED):
         config_path.write_text(config_text)
 
         model_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[Trainer] Starting spaCy training → {model_dir}")
+        logger.info(f"[Trainer] Starting spaCy training → {model_dir}")
         spacy_train(config_path, output_path=model_dir, use_gpu=-1, overrides={})
 
-    print(f"\n[Trainer] Training complete. Best model at {model_dir / 'model-best'}")
+    logger.info(f"\n[Trainer] Training complete. Best model at {model_dir / 'model-best'}")
     _report_f1(model_dir / "model-best", dev_recs)
 
 
@@ -261,10 +264,10 @@ def _report_f1(model_path: Path, dev_recs: list[dict]):
         examples.append(Example(pred, ref))
 
     scores = nlp.evaluate(examples)
-    print("\n── Per-entity F1 (dev set) ─────────────────────")
+    logger.info("\n── Per-entity F1 (dev set) ─────────────────────")
     for label, m in sorted(scores.get("ents_per_type", {}).items()):
-        print(f"  {label:<15} P={m['p']:.3f}  R={m['r']:.3f}  F={m['f']:.3f}")
-    print(f"\n  Overall  F={scores.get('ents_f', 0):.3f}  "
+        logger.info(f"  {label:<15} P={m['p']:.3f}  R={m['r']:.3f}  F={m['f']:.3f}")
+    logger.info(f"\n  Overall  F={scores.get('ents_f', 0):.3f}  "
           f"P={scores.get('ents_p', 0):.3f}  R={scores.get('ents_r', 0):.3f}")
 
 
