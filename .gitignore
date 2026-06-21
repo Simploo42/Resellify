@@ -26,3 +26,6 @@ test_olx.py
 
 # Trained model weights (large binaries — ship via model registry or DVC)
 models/
+
+# Claude Code agent runtime state
+.claude/
