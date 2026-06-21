@@ -120,7 +120,8 @@ class HaikuLabeler:
         if openrouter_key:
             from openai import AsyncOpenAI
             self._backend = "openrouter"
-            self._model = OPENROUTER_MODEL
+            # Allow overriding via OPENROUTER_MODEL env var (e.g. a free model)
+            self._model = os.environ.get("OPENROUTER_MODEL", OPENROUTER_MODEL)
             self._openai_client = AsyncOpenAI(
                 base_url="https://openrouter.ai/api/v1",
                 api_key=openrouter_key,
@@ -173,7 +174,7 @@ class HaikuLabeler:
         if self._backend == "openrouter":
             resp = await self._openai_client.chat.completions.create(
                 model=self._model,
-                max_tokens=1024,
+                max_tokens=4096,
                 temperature=0,
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},
@@ -194,16 +195,26 @@ class HaikuLabeler:
     async def _label_batch(self, batch: list[dict]) -> list[LabelRecord]:
         user_msg = _build_user_message(batch)
 
+        raw_text = ""
         try:
             raw_text = await self._call_api(user_msg)
             # Strip accidental markdown fences
-            if raw_text.startswith("```"):
+            if "```" in raw_text:
                 raw_text = raw_text.split("```")[1]
                 if raw_text.lower().startswith("json"):
                     raw_text = raw_text[4:]
+            # Models that add prose before JSON: find the first "[" array start
+            bracket = raw_text.find("[")
+            if bracket > 0:
+                raw_text = raw_text[bracket:]
+            # Trim any trailing prose after the closing "]"
+            rbracket = raw_text.rfind("]")
+            if rbracket != -1:
+                raw_text = raw_text[:rbracket + 1]
             parsed = json.loads(raw_text.strip())
         except Exception as e:
-            print(f"[Labeler] API/parse error on batch of {len(batch)}: {e}")
+            snippet = repr(raw_text[:200]) if 'raw_text' in dir() else '<no response>'
+            print(f"[Labeler] API/parse error on batch of {len(batch)}: {e} | raw={snippet}", flush=True)
             # Return placeholder records for the whole batch so the pipeline
             # routes them to the spot-check queue rather than crashing.
             return [
