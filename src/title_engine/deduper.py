@@ -50,25 +50,39 @@ class Deduper:
         """
         self.clusters = {}
         self._kept = []
+        # prefix bucket: first 6 chars → list of indices in self._kept
+        # Only compare against items with the same or adjacent prefix to avoid O(n²) on
+        # clearly dissimilar strings.
+        _buckets: dict[str, list[int]] = {}
 
-        for item in items:
+        n_in = len(items)
+        print(f"[Deduper] Deduplicating {n_in} titles (threshold={self.threshold})…", flush=True)
+
+        for idx, item in enumerate(items):
+            if idx % 500 == 0 and idx > 0:
+                print(f"[Deduper]   {idx}/{n_in} processed, {len(self._kept)} unique so far…", flush=True)
+
             raw = item.get("raw", "")
+            prefix = raw.lower()[:6]
+            candidates = _buckets.get(prefix, [])
+
             merged = False
-            for kept_item in self._kept:
+            for ki in candidates:
+                kept_item = self._kept[ki]
                 sim = jaccard(raw, kept_item["raw"], self.shingle_n)
                 if sim >= self.threshold:
                     self.clusters[kept_item["id"]].append(item["id"])
                     merged = True
                     break
+
             if not merged:
+                new_idx = len(self._kept)
                 self._kept.append(item)
                 self.clusters[item["id"]] = []
+                _buckets.setdefault(prefix, []).append(new_idx)
 
-        n_in = len(items)
         n_out = len(self._kept)
-        if n_in != n_out:
-            print(f"[Deduper] {n_in} titles → {n_out} unique ({n_in - n_out} near-duplicates removed)")
-
+        print(f"[Deduper] Done: {n_in} → {n_out} unique ({n_in - n_out} near-duplicates removed)", flush=True)
         return list(self._kept)
 
     def cluster_size(self, representative_id: str) -> int:

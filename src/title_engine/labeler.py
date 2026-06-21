@@ -157,9 +157,13 @@ class HaikuLabeler:
                 "prefilled_tags": pre,
             })
 
+        total = len(tokenized)
         records: list[LabelRecord] = []
-        for i in range(0, len(tokenized), self.batch_size):
+        for i in range(0, total, self.batch_size):
             batch = tokenized[i : i + self.batch_size]
+            batch_num = i // self.batch_size + 1
+            total_batches = (total + self.batch_size - 1) // self.batch_size
+            print(f"[Labeler] Batch {batch_num}/{total_batches}  ({i+1}–{min(i+len(batch), total)}/{total} titles)", flush=True)
             batch_records = await self._label_batch(batch)
             records.extend(batch_records)
 
