@@ -19,9 +19,12 @@ from .scrapers.olx import OLXScraper                    # HTTP (httpx+BS4) fallb
 from .scrapers.facebook_mcp import FacebookMCPScraper   # MCP primary
 from .scrapers.facebook import FacebookMarketplaceScraper # Playwright fallback
 from .scrapers.ebay_scraper import EbayScraper
-from .pricing.ebay_sold import EbaySoldPricer
+from .pricing.ebay_sold import EbaySoldPricer, EbayMarketData
 from .pricing.llm_estimator import LLMPriceEstimator
 from .scoring.deal_scorer import DealScorer
+from .title_engine.tokenizer import tokenize
+from .title_engine.cross_checker import prefill
+from .title_engine.query_builder import build_ebay_query
 
 _running = False
 _last_scan: dict[str, datetime] = {}
@@ -50,6 +53,7 @@ async def process_listing(
     pricing_cfg: dict,
     scoring_cfg: dict,
     price_config: dict,
+    ebay_cache: Optional[dict[str, EbayMarketData]] = None,
 ) -> bool:
     """Price and score a single listing. Returns True if it's a good deal."""
     price_ron = convert_price_to_ron(raw.price, raw.currency, price_config)
@@ -145,8 +149,20 @@ async def process_listing(
         await session.flush()
 
         # ── eBay pricing ────────────────────────────────────────────────────
-        search_query = raw.title[:80]
-        ebay_data = await ebay_pricer.get_market_data(search_query)
+        # Build a clean canonical query from the title using regex/gazetteer tags.
+        # This replaces the raw truncated title, improving eBay result accuracy.
+        _tokens = tokenize(raw.title)
+        _tags = prefill(_tokens)
+        search_query = build_ebay_query(_tokens, _tags)
+        if search_query != raw.title[:80]:
+            print(f"[Agent] Canonical query: {search_query!r}  (was: {raw.title[:60]!r})")
+
+        if ebay_cache is not None and search_query in ebay_cache:
+            ebay_data = ebay_cache[search_query]
+        else:
+            ebay_data = await ebay_pricer.get_market_data(search_query)
+            if ebay_cache is not None:
+                ebay_cache[search_query] = ebay_data
         usd_to_ron = price_config.get("usd_to_ron_rate", 4.55)
 
         ebay_value_ron = 0.0
@@ -329,12 +345,14 @@ async def run_scan(config: dict):
 
     print(f"[Agent] Total listings collected: {len(all_listings)}")
 
+    ebay_cache: dict[str, EbayMarketData] = {}
     good_deals = 0
     for raw in all_listings:
         try:
             is_deal = await process_listing(
                 raw, ebay_pricer, llm_estimator, scorer,
-                pricing_cfg, scoring_cfg, price_config
+                pricing_cfg, scoring_cfg, price_config,
+                ebay_cache=ebay_cache,
             )
             if is_deal:
                 good_deals += 1
