@@ -4,6 +4,7 @@ gets back BIO tags + confidence + uncertain_idx per title.
 
 Spec §2: temperature 0, JSON-only, uncertain_idx field, pre-filled regex/gazetteer spans.
 """
+import asyncio
 import json
 import os
 import textwrap
@@ -172,16 +173,32 @@ class HaikuLabeler:
 
     async def _call_api(self, user_msg: str) -> str:
         if self._backend == "openrouter":
-            resp = await self._openai_client.chat.completions.create(
-                model=self._model,
-                max_tokens=4096,
-                temperature=0,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_msg},
-                ],
-            )
-            return resp.choices[0].message.content.strip()
+            for attempt in range(6):
+                try:
+                    resp = await self._openai_client.chat.completions.create(
+                        model=self._model,
+                        max_tokens=4096,
+                        temperature=0,
+                        messages=[
+                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "user", "content": user_msg},
+                        ],
+                    )
+                    return resp.choices[0].message.content.strip()
+                except Exception as e:
+                    msg = str(e)
+                    # Parse retry_after from 429 response if available
+                    wait = 30
+                    if "retry_after_seconds" in msg:
+                        import re as _re
+                        m = _re.search(r"retry_after_seconds': (\d+\.?\d*)", msg)
+                        if m:
+                            wait = int(float(m.group(1))) + 1
+                    if "429" in msg and attempt < 5:
+                        print(f"[Labeler] 429 rate-limited — waiting {wait}s (attempt {attempt+1}/6)…", flush=True)
+                        await asyncio.sleep(wait)
+                        continue
+                    raise
         else:
             resp = await self._anthropic_client.messages.create(
                 model=self._model,
