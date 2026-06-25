@@ -38,8 +38,11 @@ _NAME_LABELS   = {"destinatar", "beneficiar", "nume", "client", "persoana",
                   "destinator", "receiver", "dest."}
 _ADDR_LABELS   = {"adresa", "strada", "adresa livrare", "loc.livrare",
                   "adresa dest", "adresa:", "loc.", "localitate"}
-_PHONE_LABELS  = {"telefon", "tel.", "tel:", "mobil", "nr.tel",
-                  "nr tel", "phone", "gsm"}
+# Note: "gsm" intentionally excluded — Romanian PDAs use it as a building code in addresses
+_PHONE_LABELS  = {"telefon", "tel.", "tel:", "mobil", "nr.tel", "nr tel", "phone"}
+# Lines whose label should be silently skipped (not part of the card fields we need)
+_SKIP_LABELS   = {"interval", "interval:", "greutate", "volum", "serviciu",
+                  "obs", "observ", "mentiune", "continut", "valoare"}
 
 
 def _has_label(line_lower: str, labels: set[str]) -> bool:
@@ -58,6 +61,12 @@ def _norm_phone(raw: str) -> str:
     if digits.startswith("40") and len(digits) == 11:
         return "0" + digits[2:]
     return digits
+
+
+def _join_addr(parts: list[str]) -> str:
+    """Join multi-line address parts, stripping bare '/' continuation markers."""
+    cleaned = [p.rstrip("/ ").strip() for p in parts if p.strip().strip("/")]
+    return ", ".join(cleaned)
 
 
 def _extract_awb(text: str) -> Optional[str]:
@@ -107,8 +116,8 @@ def _parse_cards(text_lines: list[str]) -> list[dict]:
     def _flush():
         nonlocal addr_parts, in_addr
         if addr_parts and "address" not in cur:
-            cur["address"] = " ".join(addr_parts)
-        addr_parts.clear()
+            cur["address"] = _join_addr(addr_parts)
+            addr_parts.clear()
         in_addr = False
         if all(k in cur for k in ("awb", "name", "address", "phone")):
             if all(str(cur[k]).strip() for k in ("awb", "name", "address", "phone")):
@@ -119,6 +128,14 @@ def _parse_cards(text_lines: list[str]) -> list[dict]:
         if not line:
             continue
         ll = line.lower()
+
+        # ── Skip irrelevant labelled fields (Interval, Greutate, etc.) ───────
+        if _has_label(ll, _SKIP_LABELS) and ":" in line:
+            in_addr = False
+            if addr_parts and "address" not in cur:
+                cur["address"] = _join_addr(addr_parts)
+                addr_parts.clear()
+            continue
 
         # ── AWB ──────────────────────────────────────────────────────────────
         if _has_label(ll, _AWB_LABELS):
@@ -133,7 +150,7 @@ def _parse_cards(text_lines: list[str]) -> list[dict]:
         if _has_label(ll, _NAME_LABELS) and "name" not in cur:
             in_addr = False
             if addr_parts and "address" not in cur:
-                cur["address"] = " ".join(addr_parts)
+                cur["address"] = _join_addr(addr_parts)
                 addr_parts.clear()
             val = _value_after_colon(line)
             if val:
@@ -153,7 +170,7 @@ def _parse_cards(text_lines: list[str]) -> list[dict]:
         ph_match = _PHONE_RE.search(line)
         if ph_match and "phone" not in cur:
             if in_addr:
-                cur["address"] = " ".join(addr_parts)
+                cur["address"] = _join_addr(addr_parts)
                 addr_parts.clear()
                 in_addr = False
             cur["phone"] = _norm_phone(ph_match.group())
@@ -161,7 +178,7 @@ def _parse_cards(text_lines: list[str]) -> list[dict]:
 
         if _has_label(ll, _PHONE_LABELS) and "phone" not in cur:
             if in_addr:
-                cur["address"] = " ".join(addr_parts)
+                cur["address"] = _join_addr(addr_parts)
                 addr_parts.clear()
                 in_addr = False
             val = _value_after_colon(line)
