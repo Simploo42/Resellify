@@ -3,12 +3,12 @@
 Market resell opportunity finder — watches OLX Romania, Facebook Marketplace, and eBay for flip deals.
 
 ## Stack
-- Python 3.11+, FastAPI, SQLite (aiosqlite), Playwright, Anthropic SDK
+- Python 3.11+, FastAPI, SQLite (aiosqlite), Playwright, Groq LLM API (OpenAI-compatible; Anthropic fallback)
 - Node.js (for olx-mcp and facebook-marketplace-mcp MCP servers)
 
 ## Setup
 ```bash
-cp .env.example .env        # add ANTHROPIC_API_KEY
+cp .env.example .env        # add GROQ_API_KEY (or ANTHROPIC_API_KEY as fallback)
 pip install -r requirements.txt
 playwright install chromium
 python main.py              # dashboard at http://localhost:8000
@@ -21,7 +21,7 @@ python main.py              # dashboard at http://localhost:8000
 - `src/scrapers/facebook.py` — Facebook Marketplace via Playwright (fallback)
 - `src/scrapers/ebay_scraper.py` — eBay listings scraper
 - `src/pricing/ebay_sold.py` — eBay completed/sold listings for market value + demand
-- `src/pricing/llm_estimator.py` — Claude AI price fallback when eBay data is sparse
+- `src/pricing/llm_estimator.py` — LLM price fallback (Groq preferred, Anthropic fallback) when eBay data is sparse
 - `src/scoring/deal_scorer.py` — Weighted deal scorer (profit 40%, demand 35%, confidence 15%, risk 10%)
 - `src/dashboard/` — FastAPI + Jinja2 + Tailwind dashboard
 - `src/agent.py` — Orchestrator with APScheduler-style async scan loop

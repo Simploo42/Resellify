@@ -1,11 +1,17 @@
 """
-Uses Claude to estimate market value when eBay data is sparse or unavailable.
+Uses an LLM to estimate market value when eBay data is sparse or unavailable.
+
+Backend is resolved from environment keys, in priority order:
+  1. GROQ_API_KEY      — Groq (OpenAI-compatible API, default backend)
+  2. ANTHROPIC_API_KEY — Anthropic Claude (fallback)
 """
 import json
 import os
 from dataclasses import dataclass
 
-import anthropic
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 
 @dataclass
@@ -21,17 +27,50 @@ class LLMPriceEstimate:
 
 class LLMPriceEstimator:
     def __init__(self, config: dict, usd_to_ron: float = 4.55):
-        self.model = config.get("llm_model", "claude-haiku-4-5-20251001")
+        self.config = config
         self.usd_to_ron = usd_to_ron
-        self._client: anthropic.AsyncAnthropic | None = None
+        self._backend: str | None = None
+        self._model: str | None = None
+        self._client = None
 
-    def _get_client(self) -> anthropic.AsyncAnthropic:
-        if not self._client:
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not api_key:
-                raise ValueError("ANTHROPIC_API_KEY not set. LLM pricing unavailable.")
-            self._client = anthropic.AsyncAnthropic(api_key=api_key)
-        return self._client
+    def _resolve_backend(self):
+        if self._client:
+            return
+        groq_key = os.environ.get("GROQ_API_KEY", "")
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if groq_key:
+            from openai import AsyncOpenAI
+            self._backend = "groq"
+            self._model = self.config.get(
+                "groq_model", os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
+            )
+            self._client = AsyncOpenAI(base_url=GROQ_BASE_URL, api_key=groq_key)
+        elif anthropic_key:
+            import anthropic
+            self._backend = "anthropic"
+            self._model = self.config.get("llm_model", DEFAULT_ANTHROPIC_MODEL)
+            self._client = anthropic.AsyncAnthropic(api_key=anthropic_key)
+        else:
+            raise ValueError(
+                "GROQ_API_KEY (or ANTHROPIC_API_KEY) not set. LLM pricing unavailable."
+            )
+
+    async def _complete(self, prompt: str) -> str:
+        if self._backend == "groq":
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                max_tokens=400,
+                temperature=0,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.choices[0].message.content.strip()
+        response = await self._client.messages.create(
+            model=self._model,
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text.strip()
 
     async def estimate(
         self,
@@ -42,8 +81,6 @@ class LLMPriceEstimator:
         category: str = "",
         ner_entities: dict | None = None,
     ) -> LLMPriceEstimate:
-        client = self._get_client()
-
         # Build a structured item description from NER entities when available
         if ner_entities:
             entity_lines = "\n".join(
@@ -76,12 +113,8 @@ Be realistic — use typical eBay/market sold prices, not retail.
 If you have no idea or the item is too vague, set confidence to 0.1."""
 
         try:
-            response = await client.messages.create(
-                model=self.model,
-                max_tokens=400,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = response.content[0].text.strip()
+            self._resolve_backend()
+            raw = await self._complete(prompt)
             # Strip markdown code block if present
             if raw.startswith("```"):
                 raw = raw.split("```")[1]

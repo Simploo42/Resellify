@@ -17,6 +17,8 @@ from .tokenizer import tokenize, TOKENIZER_VERSION, SCHEMA_VERSION, VALID_LABELS
 LABELER_MODEL = "claude-haiku-4-5-20251001"
 # OpenRouter model name for the same model
 OPENROUTER_MODEL = "anthropic/claude-haiku-4-5"
+# Default Groq model (OpenAI-compatible API)
+GROQ_MODEL = "llama-3.3-70b-versatile"
 BATCH_SIZE = 8
 CONFIDENCE_FLOOR = 0.75
 
@@ -115,8 +117,9 @@ class HaikuLabeler:
     def __init__(self, model: str = LABELER_MODEL, batch_size: int = BATCH_SIZE):
         self.batch_size = batch_size
         self._version_tag = datetime.utcnow().strftime("%Y-%m")
-        # Resolve backend — priority: Custom > Gemini > OpenRouter > Anthropic
+        # Resolve backend — priority: Custom > Groq > Gemini > OpenRouter > Anthropic
         custom_url = os.environ.get("CUSTOM_API_URL", "")
+        groq_key = os.environ.get("GROQ_API_KEY", "")
         gemini_key = os.environ.get("GEMINI_API_KEY", "")
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -127,6 +130,15 @@ class HaikuLabeler:
             self._openai_client = AsyncOpenAI(
                 base_url=custom_url,
                 api_key=os.environ.get("CUSTOM_API_KEY", "none"),
+            )
+            self._anthropic_client = None
+        elif groq_key:
+            from openai import AsyncOpenAI
+            self._backend = "groq"
+            self._model = os.environ.get("GROQ_MODEL", GROQ_MODEL)
+            self._openai_client = AsyncOpenAI(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=groq_key,
             )
             self._anthropic_client = None
         elif gemini_key:
@@ -155,7 +167,7 @@ class HaikuLabeler:
             self._anthropic_client = _anthropic.AsyncAnthropic(api_key=anthropic_key)
             self._openai_client = None
         else:
-            raise ValueError("Set GEMINI_API_KEY, OPENROUTER_API_KEY, or ANTHROPIC_API_KEY")
+            raise ValueError("Set GROQ_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY, or ANTHROPIC_API_KEY")
 
     async def label_titles(
         self,
@@ -191,7 +203,7 @@ class HaikuLabeler:
         return records
 
     async def _call_api(self, user_msg: str) -> str:
-        if self._backend in ("openrouter", "gemini", "custom"):
+        if self._backend in ("groq", "openrouter", "gemini", "custom"):
             for attempt in range(6):
                 try:
                     resp = await self._openai_client.chat.completions.create(

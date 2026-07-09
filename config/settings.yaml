@@ -42,8 +42,12 @@ pricing:
   # Minimum sold count to trust the eBay price estimate
   min_sold_for_high_confidence: 10
   min_sold_for_medium_confidence: 3
-  # Enable Claude AI as fallback when eBay data is sparse
+  # Enable LLM as fallback when eBay data is sparse.
+  # Backend picked from env: GROQ_API_KEY (preferred) > ANTHROPIC_API_KEY
   llm_fallback_enabled: true
+  # Model used with the Groq backend
+  groq_model: "llama-3.3-70b-versatile"
+  # Model used with the Anthropic backend
   llm_model: "claude-haiku-4-5-20251001"
   # Target currency for all price conversions
   target_currency: "RON"
