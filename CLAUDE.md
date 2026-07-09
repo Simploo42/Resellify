@@ -32,6 +32,7 @@ python main.py              # dashboard at http://localhost:8000
 python main.py              # dashboard only (manual scan via UI)
 python main.py --agent      # dashboard + auto-scan background agent
 python main.py --scan       # single scan run, then exit
+python main.py --export-csv deals.csv   # dump scored deals to CSV (also: GET /api/deals/csv)
 ```
 
 ## OLX MCP setup

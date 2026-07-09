@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request, Depends, Form, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -17,6 +17,7 @@ from sqlalchemy import select, desc, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import Listing, PriceEstimate, DealScore, ScanLog, get_db, init_db
+from ..export_csv import fetch_deal_rows, rows_to_csv
 from ..agent import load_config, run_scan, start_agent, stop_agent
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -359,6 +360,25 @@ async def deals_json(
             "scraped_at": listing.scraped_at.isoformat() if listing.scraped_at else None,
         })
     return JSONResponse(deals)
+
+
+@app.get("/api/deals/csv")
+async def deals_csv(
+    db: AsyncSession = Depends(get_db),
+    min_score: float = 0,
+    platform: str = "",
+    include_inactive: bool = False,
+):
+    rows = await fetch_deal_rows(
+        db, min_score=min_score, platform=platform, include_inactive=include_inactive
+    )
+    csv_text = rows_to_csv(rows)
+    filename = f"deals_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _grade(score: float) -> str:

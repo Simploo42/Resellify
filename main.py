@@ -3,6 +3,7 @@ Entry point. Run with:
   python main.py            # dashboard only (manual scans via UI)
   python main.py --agent    # dashboard + background agent
   python main.py --scan     # one-shot scan then exit
+  python main.py --export-csv deals.csv   # dump scored deals to CSV then exit
 """
 import asyncio
 import argparse
@@ -18,10 +19,34 @@ def main():
     parser = argparse.ArgumentParser(description="Resellify — Market resell agent")
     parser.add_argument("--agent", action="store_true", help="Start background scanning agent")
     parser.add_argument("--scan", action="store_true", help="Run a single scan and exit")
+    parser.add_argument("--export-csv", metavar="PATH", help="Export scored deals to a CSV file and exit")
+    parser.add_argument("--min-score", type=float, default=0, help="Minimum deal score for --export-csv (default 0)")
+    parser.add_argument("--platform", default="", help="Filter --export-csv by platform (olx/facebook/ebay)")
+    parser.add_argument("--include-inactive", action="store_true", help="Include inactive listings in --export-csv")
     parser.add_argument("--host", default=os.environ.get("DASHBOARD_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("DASHBOARD_PORT", 8000)))
     parser.add_argument("--config", default="config/settings.yaml")
     args = parser.parse_args()
+
+    if args.export_csv:
+        from src.db.models import init_db as db_init, AsyncSessionLocal
+        from src.export_csv import fetch_deal_rows, rows_to_csv
+
+        async def _export():
+            await db_init()
+            async with AsyncSessionLocal() as session:
+                rows = await fetch_deal_rows(
+                    session,
+                    min_score=args.min_score,
+                    platform=args.platform,
+                    include_inactive=args.include_inactive,
+                )
+            with open(args.export_csv, "w", newline="", encoding="utf-8") as f:
+                f.write(rows_to_csv(rows))
+            print(f"Exported {len(rows)} deals to {args.export_csv}")
+
+        asyncio.run(_export())
+        return
 
     if args.scan:
         from src.agent import load_config, run_scan, init_db
